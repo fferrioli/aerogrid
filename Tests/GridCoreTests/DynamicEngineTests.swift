@@ -7,15 +7,22 @@ final class MapBackend: Backend {
     var failWindow: UInt32?
     var failActivation: String?
     var activations: [(String, UInt32?)] = []
+    var calls: [String] = []
+    var failValidation: String?
+    var failSnapshot: String?
+    var onSnapshot: ((String) -> Void)?
     init(_ screen: Desktop) { self.screen = screen }
-    func desktop() throws -> Desktop { screen }
+    func desktop() throws -> Desktop { calls.append("desktop"); return screen }
     func validate(workspace: String, monitor: Int) throws {}
     func place(workspace: String, monitor: Int) throws { screen.visible[monitor] = workspace }
     func activate(workspace: String) throws {}
     func validateTarget(workspace: String, monitor: Int, window: UInt32?) throws {
+        calls.append("validate:\(workspace)")
+        if failValidation == workspace { throw GridError.unavailable("Injected validation failure") }
         if let window, screen.windows?.first(where: { $0.id == window })?.nativeMonitor != monitor { throw GridError.stale }
     }
     func activateTarget(workspace: String, monitor: Int, window: UInt32?) throws {
+        calls.append("activate:\(workspace)")
         if workspace == failActivation { throw GridError.unavailable("Injected activation failure") }
         activations.append((workspace, window)); screen.focusedMonitor = monitor
         if let window { screen.nativeVisible?[monitor] = window; screen.focusedWindow = window }
@@ -36,6 +43,9 @@ final class MapBackend: Backend {
         }
     }
     func snapshot(workspace: String) throws -> String {
+        calls.append("snapshot:\(workspace)")
+        if failSnapshot == workspace { throw GridError.unavailable("Injected snapshot failure") }
+        onSnapshot?(workspace)
         let items = (screen.windows ?? []).filter { $0.workspace == workspace }
         let identities = Set(items.map(\.identity))
         var saved = trees[workspace] ?? LayoutSnapshot(boot: "test", tree: .root([]))

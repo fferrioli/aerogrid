@@ -375,14 +375,22 @@ final class AppModel: ObservableObject {
             committingGesture = true
             log("Navigation commit: \(selection.selected.mapValues(\.spaceID))")
             closeOverview?(false)
+            let submittedAt = ProcessInfo.processInfo.systemUptime
             perform(feedback:true,completion: { [weak self] error in
                 guard let self else { return }
                 self.committingGesture = false
+                let elapsed = (ProcessInfo.processInfo.systemUptime - submittedAt) * 1000
+                self.log(String(format: "Navigation total: %.1f ms", elapsed))
                 self.log(error.map { "Navigation failed: \($0.localizedDescription)" } ?? "Navigation committed")
                 let waiting = self.deferredContacts; self.deferredContacts.removeAll()
                 // Resolve each following gesture against the desktop that actually committed.
                 if error == nil { for event in waiting { self.handleContact(event) } }
-            }) { engine in try engine.commitNavigation(selection) }
+            }) { engine in
+                let startedAt = ProcessInfo.processInfo.systemUptime
+                self.log(String(format: "Navigation queue: %.1f ms", (startedAt - submittedAt) * 1000))
+                defer { self.log(String(format: "Navigation work: %.1f ms", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)) }
+                try engine.commitNavigation(selection)
+            }
         case .step(let swipe):
             log("Contact step: \(swipe.fingers) \(swipe.direction.rawValue)")
             guard !paused, !pauseChanging, !testingGestures, backendReady, !committingGesture, !organizingDrag, !editingOrganization, !organizationMenuOpen,

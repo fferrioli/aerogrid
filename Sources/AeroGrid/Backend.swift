@@ -15,13 +15,15 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
         defer { try? output.close(); try? errors.close() }
         let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = arguments
         process.standardOutput = output; process.standardError = errors
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
         try process.run()
-        let deadline = Date().addingTimeInterval(4)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
-        if process.isRunning {
+        if finished.wait(timeout: .now() + 4) == .timedOut, process.isRunning {
             process.terminate()
-            Thread.sleep(forTimeInterval: 0.05)
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            if finished.wait(timeout: .now() + 0.05) == .timedOut, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = finished.wait(timeout: .now() + 0.25)
+            }
             throw GridError.unavailable("AeroSpace command timed out: \(arguments.first ?? "")")
         }
         let text = String(decoding: try Data(contentsOf: outURL), as: UTF8.self)

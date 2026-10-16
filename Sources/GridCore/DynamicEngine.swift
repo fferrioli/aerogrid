@@ -96,10 +96,10 @@ public final class DynamicEngine {
         state.lastDesktop = desktop
     }
     private func snapshot(_ space: Space) throws -> LayoutSnapshot { try LayoutSnapshot(json: backend.snapshot(workspace: space.workspace)) }
-    private func captureVisibleLayouts() throws {
+    private func captureVisibleLayouts(spaceIDs: Set<String>? = nil) throws {
         guard observed != nil else { return }
         // Inactive boards need the same accurate diagrams as the visible destination.
-        for space in map.spaces where space.nativeWindow == nil && !contents(of:space).isEmpty {
+        for space in map.spaces where space.nativeWindow == nil && !contents(of:space).isEmpty && (spaceIDs?.contains(space.id) ?? true) {
             let json = try backend.snapshot(workspace:space.workspace)
             editMap { $0.layouts[space.id] = json }
         }
@@ -433,10 +433,45 @@ public final class DynamicEngine {
         guard selection.step(direction) else { throw GridError.boundary }
         try commitNavigation(selection)
     }
+    // Titles and focus may change while a gesture is held. Membership, fullscreen,
+    // pending recovery and display changes still require the complete reconciliation.
+    private struct NavigationWindowState: Equatable {
+        let identity: WindowIdentity
+        let workspace: String
+        let floating: Bool
+        let nativeFullscreen: Bool
+        let nativeMonitor: Int?
+        let monitor: Int?
+        init(_ window: WindowInfo) {
+            identity = window.identity; workspace = window.workspace; floating = window.floating
+            nativeFullscreen = window.nativeFullscreen; nativeMonitor = window.nativeMonitor; monitor = window.monitor
+        }
+    }
+    private func canNavigateWithoutReconciliation(_ desktop: Desktop) -> Bool {
+        guard map.initialized == true, map.pending == nil, let previous = observed,
+              let oldWindows = previous.windows, let newWindows = desktop.windows,
+              previous.topology == desktop.topology, previous.backendSession == desktop.backendSession,
+              previous.nativeHomes == desktop.nativeHomes,
+              previous.windowHomes == desktop.windowHomes else { return false }
+        func membership(_ windows: [WindowInfo]) -> [NavigationWindowState] {
+            windows.sorted { $0.id < $1.id }.map(NavigationWindowState.init)
+        }
+        return membership(oldWindows) == membership(newWindows)
+    }
+    private func refreshForNavigation(_ selection: NavigationSelection) throws {
+        let desktop = try backend.desktop()
+        guard canNavigateWithoutReconciliation(desktop) else { try refresh(); return }
+        sync(desktop)
+        try selection.validate(map: map, configuration: configuration, desktop: desktop)
+        // Capture edits made since the last poll, without visiting unrelated spaces.
+        let relevant = Set(selection.origin.values.map(\.spaceID) + selection.selected.values.map(\.spaceID))
+        try captureVisibleLayouts(spaceIDs: relevant)
+        sync(try backend.desktop())
+    }
     public func commitNavigation(_ selection: NavigationSelection) throws {
-        try refresh()
-        guard let before = observed else { throw GridError.stale }
         guard !selection.isAtOrigin else { return }
+        try refreshForNavigation(selection)
+        guard let before = observed else { throw GridError.stale }
         try selection.validate(map: map, configuration: configuration, desktop: before)
         let moves = try selection.selected.keys.sorted().map { id -> (Display, Space) in
             guard let display = before.displays.first(where: { $0.id == id }),
@@ -448,7 +483,7 @@ public final class DynamicEngine {
         do {
             for (display, space) in moves {
                 guard try backend.desktop().topology == before.topology else { throw GridError.stale }
-                try show(space, on: display)
+                try show(space, on: display, prevalidated: true)
             }
             guard let origin = before.displays.first(where: { $0.id == selection.originDisplayID }),
                   try backend.desktop().topology == before.topology else { throw GridError.stale }
@@ -471,8 +506,8 @@ public final class DynamicEngine {
             throw failure
         }
     }
-    private func show(_ space: Space, on display: Display) throws {
-        try backend.validateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id)
+    private func show(_ space: Space, on display: Display, prevalidated: Bool = false) throws {
+        if !prevalidated { try backend.validateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id) }
         try backend.activateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id)
         let actual = try backend.desktop()
         if space.nativeWindow != nil {
