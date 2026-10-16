@@ -1,0 +1,15 @@
+# Mac OS X
+.DS_Store
+
+# Xcode
+*.xcuserstate
+project.xcworkspace/
+xcuserdata/
+build*/
+
+# Agent planning artifacts
+.agent/
+
+# Swift Package Manager test harness
+.build/
+.swiftpm/

@@ -1,0 +1,30 @@
+# Local builds and package caches
+.build/
+.swiftpm/
+**/.build/
+**/.swiftpm/
+__pycache__/
+*.py[cod]
+
+# Local runtime data, backups, diagnostics and exports
+/output/
+/backups/
+/dist/
+/demo/build/
+/demo/qa/
+/source-manifest.json
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.mobileprovision

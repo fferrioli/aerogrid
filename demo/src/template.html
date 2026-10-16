@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>AeroGrid · Recreación animada</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;background:#07070d;color:#ddd;font:13px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:14px}
+  canvas{width:min(96vw,1600px);aspect-ratio:16/9;background:#000;border-radius:8px;box-shadow:0 10px 40px #0008}
+  #bar{display:flex;gap:10px;align-items:center;width:min(96vw,1600px)}
+  #bar input{flex:1}
+  button{background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:4px 12px;cursor:pointer}
+  body.render #bar{display:none}
+  body.render #wrap{padding:0}
+  body.render canvas{width:1920px;height:1080px;border-radius:0;box-shadow:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="1920" height="1080"></canvas>
+  <div id="bar"><button id="play">▶︎</button><input id="scrub" type="range" min="0" max="80" step="0.0333" value="0"><span id="time">0.00 s</span></div>
+</div>
+<script>window.ICONS=/*ICONS*/{};</script>
+<script>
+/*DEMO_JS*/
+</script>
+</body>
+</html>

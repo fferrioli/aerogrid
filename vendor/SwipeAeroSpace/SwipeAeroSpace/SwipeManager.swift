@@ -1,0 +1,1070 @@
+import Cocoa
+import Foundation
+import KeyboardShortcuts
+import Socket
+import SwiftUI
+import os
+
+extension KeyboardShortcuts.Name {
+    static let toggleOverview = Self("toggleOverview")
+    static let nextWorkspace = Self("nextWorkspace")
+    static let prevWorkspace = Self("prevWorkspace")
+}
+
+enum Direction {
+    case next
+    case prev
+
+    var value: String {
+        switch self {
+        case .next:
+            "next"
+        case .prev:
+            "prev"
+        }
+    }
+}
+
+enum GestureState {
+    case began
+    case changed
+    case ended
+    case cancelled
+}
+
+enum SwipeAxis {
+    case undecided
+    case horizontal
+    case vertical
+}
+
+enum SwipeError: Error {
+    case SocketError(String)
+    case CommandFail(String)
+    case Unknown(String)
+}
+
+public struct ClientRequest: Codable, Sendable {
+    public let args: [String]
+    public let stdin: String
+    public let windowId: UInt32?
+
+    public init(
+        args: [String],
+        stdin: String,
+        windowId: UInt32?
+    ) {
+        self.args = args
+        self.stdin = stdin
+        self.windowId = windowId
+    }
+}
+
+public struct ServerAnswer: Codable, Sendable {
+    public let exitCode: Int32
+    public let stdout: String
+    public let stderr: String
+    public let serverVersionAndHash: String
+
+    public init(
+        exitCode: Int32,
+        stdout: String = "",
+        stderr: String = "",
+        serverVersionAndHash: String
+    ) {
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.serverVersionAndHash = serverVersionAndHash
+    }
+}
+
+class SocketInfo: ObservableObject {
+    @Published var socketConnected: Bool = false
+}
+
+extension Result {
+    public var isSuccess: Bool {
+        switch self {
+        case .success: true
+        case .failure: false
+        }
+    }
+}
+
+class SwipeManager {
+    // user settings
+    @ConfigStorage("threshold") private var swipeThreshold: Double = 1.0
+    // Clamp to 0.1 so a zero/negative sensitivity can't produce a zero
+    // threshold — Int(accDisX / threshold) would trap on inf/NaN.
+    private var internalThreshold: Float { max(Float(swipeThreshold), 0.1) * 0.05 }
+    @ConfigStorage("wrap") private var wrapWorkspace: Bool = false
+    @ConfigStorage("natural") private var naturalSwipe: Bool = true
+    @ConfigStorage("skip-empty") private var skipEmpty: Bool = false
+    @ConfigStorage("fingers") private var fingers: String = "Three"
+    @ConfigStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
+    @ConfigStorage("maxSteps") private var maxSteps: Int = 5
+    @ConfigStorage("swipeUpOverview") private var swipeUpOverviewEnabled: Bool = true
+    @ConfigStorage("swipeUpFingers") private var swipeUpFingers: String = "Three"
+    @ConfigStorage("show-empty-workspaces") private var showEmptyWorkspaces: Bool = false
+
+    var socketInfo = SocketInfo()
+
+    private static let queueKey = DispatchSpecificKey<Void>()
+
+    init() {
+        workQueue.setSpecific(key: Self.queueKey, value: ())
+    }
+
+    private var eventTap: CFMachPort? = nil
+    private var accDisX: Float = 0
+    private var accDisY: Float = 0
+    private var swipeUpFired: Bool = false
+    private var firedPosition: Int = 0
+    private var prevTouchPositions: [String: NSPoint] = [:]
+    private var state: GestureState = .ended
+    private var swipeAxis: SwipeAxis = .undecided
+    private var activeFingerCount: Int = 0
+    private var gestureModifiers: NSEvent.ModifierFlags = []
+    private var gestureFocusDone: Bool = false
+    private var pendingSwipeWork: DispatchWorkItem? = nil
+    private var socket: Socket? = nil
+    private var readBuffer = Data()
+    private var protocolVersion: Int = 1
+    private var heartbeatTimer: DispatchSourceTimer? = nil
+    private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
+    private let overlayController = OverlayPanelController()
+
+    private var logger: Logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "club.mediosz.SwipeAeroSpace",
+        category: "Info"
+    )
+
+    private func readExactly(count: Int) throws -> Data {
+        guard let socket = socket else {
+            throw SwipeError.SocketError("No socket created")
+        }
+        while readBuffer.count < count {
+            var temp = Data()
+            let bytesRead = try socket.read(into: &temp)
+            if bytesRead == 0 {
+                throw SwipeError.SocketError("Socket connection closed by peer")
+            }
+            readBuffer.append(temp)
+        }
+        let chunk = Data(readBuffer.prefix(count))
+        readBuffer.removeFirst(count)
+        return chunk
+    }
+
+    private func runCommand(args: [String], stdin: String, retry: Bool = false)
+        -> Result<String, SwipeError>
+    {
+        guard let socket = socket else {
+            return .failure(.SocketError("No socket created"))
+        }
+        do {
+            let request: Data
+            if protocolVersion == 1 {
+                request = try JSONEncoder().encode(
+                    ClientRequest(args: args, stdin: stdin, windowId: nil)
+                )
+                // Send length prefix as a 4-byte unsigned integer (little-endian)
+                let requestLength = UInt32(request.count)
+                let lengthData = Data([
+                    UInt8(requestLength & 0xFF),
+                    UInt8((requestLength >> 8) & 0xFF),
+                    UInt8((requestLength >> 16) & 0xFF),
+                    UInt8((requestLength >> 24) & 0xFF)
+                ])
+                try socket.write(from: lengthData)
+            } else {
+                struct OldClientRequest: Codable {
+                    let command: String
+                    let args: [String]
+                    let stdin: String
+                    let windowId: UInt32?
+                    let workspace: String?
+                }
+                request = try JSONEncoder().encode(
+                    OldClientRequest(command: "", args: args, stdin: stdin, windowId: nil, workspace: nil)
+                )
+            }
+            // Send JSON bytes
+            try socket.write(from: request)
+
+            let result: ServerAnswer
+            if protocolVersion == 1 {
+                // Read response length prefix (4 bytes)
+                let responseLengthData = try readExactly(count: 4)
+                let responseLength = UInt32(responseLengthData[0]) |
+                                     (UInt32(responseLengthData[1]) << 8) |
+                                     (UInt32(responseLengthData[2]) << 16) |
+                                     (UInt32(responseLengthData[3]) << 24)
+                
+                // Read response JSON bytes
+                let responseData = try readExactly(count: Int(responseLength))
+                result = try JSONDecoder().decode(
+                    ServerAnswer.self,
+                    from: responseData
+                )
+            } else {
+                let _ = try Socket.wait(
+                    for: [socket],
+                    timeout: 0,
+                    waitForever: true
+                )
+                var answer = Data()
+                try socket.read(into: &answer)
+                result = try JSONDecoder().decode(
+                    ServerAnswer.self,
+                    from: answer
+                )
+            }
+            if result.exitCode != 0 {
+                return .failure(.CommandFail(result.stderr))
+            }
+            return .success(result.stdout)
+
+        } catch let error {
+            guard let socketError = error as? Socket.Error else {
+                return .failure(.Unknown(error.localizedDescription))
+            }
+            // if we encouter the socket error
+            // try reconnect the socket and rerun the command only once.
+            if retry {
+                return .failure(.SocketError(socketError.localizedDescription))
+            }
+            logger.info("Trying reconnect socket...")
+            connectSocket(reconnect: true)
+            return runCommand(args: args, stdin: stdin, retry: true)
+        }
+    }
+
+    private func getNonEmptyWorkspaces() -> Result<String, SwipeError> {
+        let args = [
+            "list-workspaces", "--monitor", "focused", "--empty", "no",
+        ]
+        return runCommand(args: args, stdin: "")
+    }
+
+    func toggleWorkspaceOverview() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.overlayController.isVisible {
+                self.overlayController.dismiss()
+            } else {
+                self.showWorkspaceOverview()
+            }
+        }
+    }
+
+    func showWorkspaceOverview() {
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            // Phase 1: quick query (3 socket calls) — show immediately
+            let (shellWorkspaces, originalWs, focusedMonitorId) = self.queryWorkspacesShell()
+            let originalWsOpt: String? = originalWs.isEmpty ? nil : originalWs
+
+            let makeCallbacks: () -> (
+                onSelect: (String) -> Void,
+                onSelectWindow: (String) -> Void,
+                onPreview: (String) -> Void,
+                onRevert: () -> Void
+            ) = { [weak self] in
+                (
+                    onSelect: { wsName in
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                        }
+                    },
+                    onSelectWindow: { windowId in
+                        self?.workQueue.async {
+                            switch self?.runCommand(
+                                args: ["focus", "--window-id", windowId], stdin: "")
+                            {
+                            case .failure(let err):
+                                self?.logger.error("\(err.localizedDescription)")
+                            default:
+                                break
+                            }
+                        }
+                    },
+                    onPreview: { wsName in
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                        }
+                    },
+                    onRevert: {
+                        guard let originalWs = originalWsOpt else { return }
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", originalWs], stdin: "")
+                        }
+                    }
+                )
+            }
+
+            let cb = makeCallbacks()
+            DispatchQueue.main.async {
+                self.overlayController.show(
+                    workspaces: shellWorkspaces,
+                    focusedMonitorId: focusedMonitorId,
+                    onSelect: cb.onSelect,
+                    onSelectWindow: cb.onSelectWindow,
+                    onPreview: cb.onPreview,
+                    onRevert: cb.onRevert
+                )
+            }
+
+            // Phase 2: fetch window details and update in place
+            let fullWorkspaces = self.queryWindows(for: shellWorkspaces)
+            DispatchQueue.main.async {
+                guard self.overlayController.isVisible else { return }
+                self.overlayController.update(workspaces: fullWorkspaces)
+            }
+        }
+    }
+
+    /// Quick query: workspace names, monitors, focused state (4 socket calls)
+    /// Returns (workspaces, focusedWorkspaceName, focusedMonitorId)
+    private func queryWorkspacesShell() -> ([WorkspaceInfo], String, String?) {
+        let focusedResult = runCommand(
+            args: ["list-workspaces", "--focused"], stdin: ""
+        )
+        let focusedWs = (try? focusedResult.get())?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ) ?? ""
+
+        // Get the monitor ID for the focused workspace
+        let focusedMonitorResult = runCommand(
+            args: ["list-workspaces", "--focused", "--format", "%{monitor-id}"],
+            stdin: ""
+        )
+        let focusedMonitorId = (try? focusedMonitorResult.get())?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+
+        let monitorResult = runCommand(
+            args: [
+                "list-monitors", "--format", "%{monitor-id}|%{monitor-name}",
+            ],
+            stdin: ""
+        )
+        var monitorNames: [String: String] = [:]
+        if let monitorOutput = try? monitorResult.get() {
+            for line in monitorOutput.split(separator: "\n") {
+                let parts = line.split(separator: "|", maxSplits: 1)
+                if parts.count == 2 {
+                    monitorNames[String(parts[0])] = String(parts[1])
+                }
+            }
+        }
+
+        var args = [
+            "list-workspaces", "--monitor", "all",
+            "--format", "%{workspace}|%{monitor-id}",
+        ]
+        if !showEmptyWorkspaces {
+            args.append(contentsOf: ["--empty", "no"])
+        }
+        let allResult = runCommand(
+            args: args,
+            stdin: ""
+        )
+        guard let allOutput = try? allResult.get() else { return ([], focusedWs, focusedMonitorId) }
+
+        let workspaces: [WorkspaceInfo] = allOutput.split(separator: "\n").compactMap { line in
+            let parts = line.split(separator: "|", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            let name = String(parts[0])
+            let monitorId = String(parts[1])
+            return WorkspaceInfo(
+                id: name,
+                windows: [],
+                isFocused: name == focusedWs,
+                monitorId: monitorId,
+                monitorName: monitorNames[monitorId] ?? "Monitor \(monitorId)"
+            )
+        }
+        return (workspaces, focusedWs, focusedMonitorId)
+    }
+
+    /// Fetch window details for a list of workspaces (1 socket call per workspace)
+    private func queryWindows(for workspaces: [WorkspaceInfo]) -> [WorkspaceInfo] {
+        return workspaces.map { ws in
+            let winResult = runCommand(
+                args: [
+                    "list-windows", "--workspace", ws.id,
+                    "--format", "%{window-id}|%{app-name}|%{window-title}",
+                ],
+                stdin: ""
+            )
+            let windows: [WindowInfo]
+            if let winOutput = try? winResult.get(),
+                !winOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                // Malformed lines (bad window ids) are skipped: a bogus id
+                // would make the row's click silently ineffective.
+                windows = winOutput.split(separator: "\n").enumerated().compactMap {
+                    idx, line -> WindowInfo? in
+                    guard let parsed = parseWindowLine(String(line)) else { return nil }
+                    // Keep the composite display id: the same window can shift
+                    // index between refreshes, and stable ids avoid animation
+                    // jitter; the window id used for focusing rides separately.
+                    return WindowInfo(
+                        id: "\(ws.id)-\(idx)",
+                        windowId: parsed.windowId,
+                        appName: parsed.appName,
+                        windowTitle: parsed.windowTitle
+                    )
+                }
+            } else {
+                windows = []
+            }
+            return WorkspaceInfo(
+                id: ws.id,
+                windows: windows,
+                isFocused: ws.isFocused,
+                monitorId: ws.monitorId,
+                monitorName: ws.monitorName
+            )
+        }
+    }
+
+    /// One swipe step. Modifier keys captured at gesture start remap the
+    /// target command: Shift carries the focused window to the neighbouring
+    /// workspace, Ctrl switches monitors instead of workspaces.
+    private func fireSwipeStep(
+        direction: Direction, modifiers: NSEvent.ModifierFlags
+    ) -> Result<String, SwipeError> {
+        var args: [String]
+        if modifiers.contains(.shift) {
+            args = ["move-node-to-workspace", direction.value]
+        } else if modifiers.contains(.control) {
+            args = ["focus-monitor", direction.value]
+        } else if skipEmpty {
+            guard let target = skipEmptyTarget(direction: direction) else {
+                return .success("")
+            }
+            args = ["workspace", target]
+        } else {
+            args = ["workspace", direction.value]
+        }
+        if wrapWorkspace && args.last == direction.value {
+            args.append("--wrap-around")
+        }
+        return runCommand(args: args, stdin: "")
+    }
+
+    /// Resolve the neighbouring non-empty workspace ourselves instead of
+    /// relying on `workspace next/prev --stdin`: AeroSpace navigates as if
+    /// the focus were on the first workspace of the stdin list whenever the
+    /// focused workspace isn't in that list — e.g. right after its last
+    /// window closed (#15).
+    private func skipEmptyTarget(direction: Direction) -> String? {
+        let focusedResult = runCommand(
+            args: ["list-workspaces", "--focused"], stdin: ""
+        )
+        guard let focusedOutput = try? focusedResult.get() else { return nil }
+        let focusedWs = focusedOutput.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+
+        guard let occupiedOutput = try? getNonEmptyWorkspaces().get() else {
+            return nil
+        }
+        let occupied = occupiedOutput
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !occupied.isEmpty else { return nil }
+
+        if let index = occupied.firstIndex(of: focusedWs) {
+            guard
+                let neighborIndex = neighbor(
+                    of: index, count: occupied.count, direction: direction
+                )
+            else { return nil }
+            return occupied[neighborIndex]
+        }
+
+        // The focused workspace is empty: locate it among all workspaces
+        // on the monitor and pick the nearest occupied neighbour.
+        guard let allOutput = try? runCommand(
+            args: ["list-workspaces", "--monitor", "focused"], stdin: ""
+        ).get() else { return nil }
+        let all = allOutput
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard let focusedIndex = all.firstIndex(of: focusedWs) else {
+            return direction == .next ? occupied.first : occupied.last
+        }
+
+        let occupiedPositions = all.enumerated().compactMap {
+            pos, name -> (pos: Int, occupiedIndex: Int)? in
+            occupied.firstIndex(of: name).map { (pos, $0) }
+        }
+        switch direction {
+        case .next:
+            if let ahead = occupiedPositions.first(where: { $0.pos > focusedIndex }) {
+                return occupied[ahead.occupiedIndex]
+            }
+            return wrapWorkspace ? occupied.first : nil
+        case .prev:
+            if let behind = occupiedPositions.last(where: { $0.pos < focusedIndex }) {
+                return occupied[behind.occupiedIndex]
+            }
+            return wrapWorkspace ? occupied.last : nil
+        }
+    }
+
+    private func neighbor(
+        of index: Int, count: Int, direction: Direction
+    ) -> Int? {
+        switch direction {
+        case .next:
+            let next = index + 1
+            if next < count { return next }
+            return wrapWorkspace ? 0 : nil
+        case .prev:
+            let prev = index - 1
+            if prev >= 0 { return prev }
+            return wrapWorkspace ? count - 1 : nil
+        }
+    }
+
+    @discardableResult
+    private func switchWorkspace(
+        direction: Direction, modifiers: NSEvent.ModifierFlags = []
+    ) -> Result<
+        String, SwipeError
+    > {
+
+        var res = runCommand(
+            args: ["list-workspaces", "--monitor", "mouse", "--visible"],
+            stdin: ""
+        )
+        guard let mouse_on = try? res.get() else {
+            return res
+        }
+        res = runCommand(args: ["workspace", mouse_on], stdin: "")
+        guard (try? res.get()) != nil else {
+            return res
+        }
+
+        return fireSwipeStep(direction: direction, modifiers: modifiers)
+    }
+
+    func nextWorkspace() {
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: .next) {
+            case .success: return
+            case .failure(let err): self.logger.error("\(err.localizedDescription)")
+            }
+        }
+    }
+
+    func prevWorkspace() {
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: .prev) {
+            case .success: return
+            case .failure(let err): self.logger.error("\(err.localizedDescription)")
+            }
+        }
+    }
+
+    private func getAeroSpaceProtocolVersion() -> Int {
+        let bundleIds = ["bobko.aerospace", "bobko.aerospace.debug"]
+        for id in bundleIds {
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first,
+               let bundleURL = app.bundleURL,
+               let bundle = Bundle(url: bundleURL),
+               let versionStr = bundle.infoDictionary?["CFBundleShortVersionString"] as? String {
+                logger.info("Found AeroSpace version: \(versionStr)")
+                let cleanVersion = versionStr.components(separatedBy: "-").first ?? ""
+                let parts = cleanVersion.components(separatedBy: ".").compactMap { Int($0) }
+                if parts.count >= 2 {
+                    let major = parts[0]
+                    let minor = parts[1]
+                    if major > 0 || minor >= 21 {
+                        return 1
+                    }
+                }
+                return 0
+            }
+        }
+        return 1
+    }
+
+    func connectSocket(reconnect: Bool = false) {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            performConnectSocket(reconnect: reconnect)
+        } else {
+            // Async so a slow/stalled socket handshake never blocks the
+            // main thread (start() runs this during app launch).
+            workQueue.async { [weak self] in
+                self?.performConnectSocket(reconnect: reconnect)
+            }
+        }
+    }
+
+    private func performConnectSocket(reconnect: Bool = false) {
+        if socket != nil && !reconnect {
+            logger.warning("socket is connected")
+            return
+        }
+
+        let socket_path = "/tmp/bobko.aerospace-\(NSUserName()).sock"
+        protocolVersion = getAeroSpaceProtocolVersion()
+        logger.info("Detected AeroSpace protocol version: \(self.protocolVersion)")
+        
+        do {
+            socket = try Socket.create(
+                family: .unix,
+                type: .stream,
+                proto: .unix
+            )
+            try socket?.connect(to: socket_path)
+            
+            readBuffer.removeAll()
+            
+            if protocolVersion == 1 {
+                // Perform handshake: write version 1
+                let version: UInt32 = 1
+                let versionData = Data([
+                    UInt8(version & 0xFF),
+                    UInt8((version >> 8) & 0xFF),
+                    UInt8((version >> 16) & 0xFF),
+                    UInt8((version >> 24) & 0xFF)
+                ])
+                try socket?.write(from: versionData)
+                
+                // Perform handshake: read version
+                let serverVersionData = try readExactly(count: 4)
+                let serverVersion = UInt32(serverVersionData[0]) |
+                                    (UInt32(serverVersionData[1]) << 8) |
+                                    (UInt32(serverVersionData[2]) << 16) |
+                                    (UInt32(serverVersionData[3]) << 24)
+                if serverVersion != 1 {
+                    logger.error("AeroSpace server protocol version is \(serverVersion), expected 1")
+                    socket?.close()
+                    socket = nil
+                    DispatchQueue.main.async {
+                        self.socketInfo.socketConnected = false
+                    }
+                    return
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.socketInfo.socketConnected = true
+            }
+            logger.info("connected to socket \(socket_path) (protocol \(self.protocolVersion))")
+        } catch let error {
+            socket?.close()
+            socket = nil
+            DispatchQueue.main.async {
+                self.socketInfo.socketConnected = false
+            }
+            logger.error("Unexpected error: \(error.localizedDescription)")
+        }
+    }
+
+    func start() {
+        if eventTap != nil {
+            logger.warning("SwipeManager is already started")
+            return
+        }
+        registerShortcuts()
+        logger.info("SwipeManager start")
+        eventTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: NSEvent.EventTypeMask.gesture.rawValue,
+            callback: { proxy, type, cgEvent, me in
+                let wrapper = Unmanaged<SwipeManager>.fromOpaque(me!)
+                    .takeUnretainedValue()
+                return wrapper.eventHandler(
+                    proxy: proxy,
+                    eventType: type,
+                    cgEvent: cgEvent
+                )
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        if eventTap == nil {
+            logger.error("SwipeManager couldn't create event tap")
+            return
+        }
+
+        let runLoopSource = CFMachPortCreateRunLoopSource(nil, eventTap, 0)
+        CFRunLoopAddSource(
+            CFRunLoopGetCurrent(),
+            runLoopSource,
+            CFRunLoopMode.commonModes
+        )
+        CGEvent.tapEnable(tap: eventTap!, enable: true)
+
+        connectSocket()
+        startHeartbeat()
+    }
+
+    /// Periodically probe the daemon so a restarted or quit AeroSpace is
+    /// detected (and reconnected to) without waiting for the next gesture to
+    /// fail. Also retries the initial connection if AeroSpace wasn't running
+    /// yet at launch.
+    private func startHeartbeat() {
+        let timer = DispatchSource.makeTimerSource(queue: workQueue)
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if self.socket == nil {
+                self.performConnectSocket()
+                return
+            }
+            switch self.runCommand(args: ["list-workspaces", "--focused"], stdin: "") {
+            case .success:
+                if !self.socketInfo.socketConnected {
+                    DispatchQueue.main.async {
+                        self.socketInfo.socketConnected = true
+                    }
+                }
+            case .failure(let error):
+                // runCommand already attempted one reconnect internally;
+                // the next heartbeat retries if that didn't heal it.
+                self.logger.error("Heartbeat failed: \(error.localizedDescription)")
+            }
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+
+    func stop() {
+        unregisterShortcuts()
+        logger.info("stop the app")
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
+        }
+        workQueue.async { [weak self] in
+            self?.socket?.close()
+            self?.socket = nil
+            DispatchQueue.main.async {
+                self?.socketInfo.socketConnected = false
+            }
+        }
+    }
+
+    private func eventHandler(
+        proxy: CGEventTapProxy,
+        eventType: CGEventType,
+        cgEvent: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        if eventType.rawValue == NSEvent.EventType.gesture.rawValue,
+            let nsEvent = NSEvent(cgEvent: cgEvent)
+        {
+            touchEventHandler(nsEvent)
+        } else if eventType == .tapDisabledByUserInput
+            || eventType == .tapDisabledByTimeout
+        {
+            logger.info("SwipeManager tap disabled \(eventType.rawValue)")
+            if let eventTap = eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+            }
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
+
+    private func registerShortcuts() {
+        // onKeyDown appends listeners, so clear our handlers before re-registering.
+        unregisterShortcuts()
+        KeyboardShortcuts.onKeyDown(for: .toggleOverview) { [weak self] in
+            self?.toggleWorkspaceOverview()
+        }
+        KeyboardShortcuts.onKeyDown(for: .nextWorkspace) { [weak self] in
+            self?.nextWorkspace()
+        }
+        KeyboardShortcuts.onKeyDown(for: .prevWorkspace) { [weak self] in
+            self?.prevWorkspace()
+        }
+    }
+
+    private func unregisterShortcuts() {
+        // removeHandler detaches both the listener and the hotkey, unlike
+        // disable() which leaves handlers attached.
+        for name in [KeyboardShortcuts.Name.toggleOverview, .nextWorkspace, .prevWorkspace] {
+            KeyboardShortcuts.removeHandler(for: name)
+        }
+    }
+
+    private func touchEventHandler(_ nsEvent: NSEvent) {
+        let touches = nsEvent.allTouches()
+
+        // Sometimes there are empty touch events that we have to skip. There are no empty touch events if Mission Control or App Expose use 3-finger swipes though.
+        if touches.isEmpty {
+            return
+        }
+
+        // AppKit marks incidental contacts, such as a thumb or palm resting on
+        // the trackpad, as resting touches. Exclude them from both the finger
+        // count and movement calculation while the system classifies them as
+        // resting.
+        let gestureTouches = Set(touches.filter { !$0.isResting })
+
+        // Count only active touches. macOS includes `.ended` (and sometimes
+        // `.stationary`) touches in the same event frame as moving fingers,
+        // which can briefly inflate the count and falsely latch the gesture
+        // (e.g. a 3-finger drag-to-select reporting count == 4 for one frame).
+        let touchesCount = gestureTouches.filter { $0.phase != .ended }.count
+        if touchesCount == 0 {
+            stopGesture()
+        } else {
+            processTouches(
+                touches: gestureTouches,
+                count: touchesCount,
+                modifiers: nsEvent.modifierFlags
+            )
+        }
+    }
+
+    private func stopGesture() {
+        if state == .began {
+            state = .ended
+            if swipeAxis != .vertical {
+                handleGesture()
+            }
+            clearEventState()
+        }
+    }
+
+    private func processTouches(
+        touches: Set<NSTouch>, count: Int, modifiers: NSEvent.ModifierFlags
+    ) {
+        let hFingerCount = fingers == "Three" ? 3 : 4
+        let vFingerCount = swipeUpFingers == "Three" ? 3 : 4
+        if state != .began && (count == hFingerCount || count == vFingerCount) {
+            state = .began
+            activeFingerCount = count
+            // Latch the modifiers held when the gesture starts so keys typed
+            // mid-gesture don't change its meaning.
+            gestureModifiers = modifiers.intersection(
+                .deviceIndependentFlagsMask
+            )
+        }
+        // While axis is still undecided, cancel the gesture if the active
+        // count drifts entirely outside the valid range (neither matches the
+        // horizontal nor the vertical finger count). Do NOT update
+        // `activeFingerCount` here — lowering it on a transient drop would
+        // silently swallow legitimate gestures where a finger briefly lifts.
+        if state == .began && swipeAxis == .undecided
+            && count != hFingerCount && count != vFingerCount
+        {
+            state = .ended
+            clearEventState()
+            return
+        }
+        if state == .began {
+            let (disX, disY) = swipeDistance(touches: touches)
+            accDisX += disX
+            accDisY += disY
+
+            // Lock axis once we have enough movement
+            if swipeAxis == .undecided {
+                let threshold = internalThreshold * 0.3
+                if abs(accDisX) > threshold || abs(accDisY) > threshold {
+                    swipeAxis =
+                        abs(accDisY) > abs(accDisX) ? .vertical : .horizontal
+                }
+            }
+
+            // Vertical swipes: only fire if finger count matches overview setting
+            if swipeAxis == .vertical && swipeUpOverviewEnabled
+                && activeFingerCount == vFingerCount
+            {
+                let threshold = internalThreshold * 0.5
+                if !swipeUpFired && accDisY > threshold {
+                    swipeUpFired = true
+                    if !overlayController.isVisible {
+                        showWorkspaceOverview()
+                    }
+                }
+                // Mid-gesture: swipe back down dismisses when accDisY reverses
+                if swipeUpFired && accDisY < threshold * 0.5 {
+                    swipeUpFired = false
+                    DispatchQueue.main.async { [weak self] in
+                        self?.overlayController.dismiss()
+                    }
+                }
+                // New gesture: swipe down dismisses if overlay is already open
+                if !swipeUpFired && accDisY < -threshold
+                    && overlayController.isVisible
+                {
+                    swipeUpFired = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.overlayController.dismiss()
+                    }
+                }
+            }
+
+            // Only fire horizontal workspace switches for horizontal swipes
+            // and only when the active finger count matches the configured
+            // finger count (mirrors the guard on the vertical/overview path).
+            if swipeAxis == .horizontal && multiSwipeEnabled && activeFingerCount == hFingerCount {
+                let threshold = internalThreshold
+                let rawPosition = Int(accDisX / threshold)
+                let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
+                let delta = targetPosition - firedPosition
+
+                if delta != 0 {
+                    let direction: Direction
+                    if delta > 0 {
+                        direction = naturalSwipe ? .prev : .next
+                    } else {
+                        direction = naturalSwipe ? .next : .prev
+                    }
+                    let stepsToFire = abs(delta)
+                    firedPosition = targetPosition
+                    let modifiers = gestureModifiers
+
+                    // Cancel any pending work so we don't overshoot
+                    pendingSwipeWork?.cancel()
+
+                    let workItem = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+
+                        // Focus the workspace under the cursor once per gesture
+                        if !self.gestureFocusDone {
+                            let res = self.runCommand(
+                                args: ["list-workspaces", "--monitor", "mouse", "--visible"],
+                                stdin: ""
+                            )
+                            if let mouseWs = try? res.get() {
+                                _ = self.runCommand(args: ["workspace", mouseWs], stdin: "")
+                            }
+                            self.gestureFocusDone = true
+                        }
+
+                        // Fire only the lean next/prev calls
+                        for _ in 0..<stepsToFire {
+                            switch self.fireSwipeStep(
+                                direction: direction, modifiers: modifiers
+                            ) {
+                            case .success: continue
+                            case .failure(let err):
+                                self.logger.error("\(err.localizedDescription)")
+                                return
+                            }
+                        }
+                    }
+                    pendingSwipeWork = workItem
+                    workQueue.async(execute: workItem)
+                }
+            }
+        }
+    }
+
+    private func clearEventState() {
+        accDisX = 0
+        accDisY = 0
+        firedPosition = 0
+        swipeUpFired = false
+        swipeAxis = .undecided
+        activeFingerCount = 0
+        gestureModifiers = []
+        gestureFocusDone = false
+        prevTouchPositions.removeAll()
+    }
+
+    private func handleGesture() {
+        // If multi-swipe is enabled, switches already fired live during the gesture
+        if multiSwipeEnabled {
+            return
+        }
+        // Mirror the multi-swipe path's finger-count guard: only fire when
+        // the active count matches the configured horizontal finger count.
+        let hFingerCount = fingers == "Three" ? 3 : 4
+        if activeFingerCount != hFingerCount {
+            return
+        }
+        let threshold = internalThreshold
+        if abs(accDisX) < threshold {
+            return
+        }
+        let direction: Direction =
+            if naturalSwipe {
+                accDisX < 0 ? .next : .prev
+            } else {
+                accDisX < 0 ? .prev : .next
+            }
+        let modifiers = gestureModifiers
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: direction, modifiers: modifiers) {
+            case .success: return
+            case .failure(let err):
+                self.logger.error("\(err.localizedDescription)")
+            }
+        }
+    }
+
+    private func swipeDistance(touches: Set<NSTouch>) -> (Float, Float) {
+        var allRight = true
+        var allLeft = true
+        var allUp = true
+        var allDown = true
+        var sumDisX = Float(0)
+        var sumDisY = Float(0)
+        var activeTouches = 0
+        for touch in touches {
+            let (disX, disY) = touchDistance(touch)
+            allRight = allRight && disX >= 0
+            allLeft = allLeft && disX <= 0
+            allUp = allUp && disY >= 0
+            allDown = allDown && disY <= 0
+            sumDisX += disX
+            sumDisY += disY
+
+            if touch.phase == .ended {
+                prevTouchPositions.removeValue(forKey: "\(touch.identity)")
+            } else {
+                prevTouchPositions["\(touch.identity)"] =
+                    touch.normalizedPosition
+                activeTouches += 1
+            }
+        }
+
+        // Average across fingers so threshold behaves consistently
+        // regardless of finger count
+        let count = max(activeTouches, 1)
+        var resultX = sumDisX / Float(count)
+        var resultY = sumDisY / Float(count)
+
+        // All fingers should move in the same direction for each axis.
+        if !allRight && !allLeft {
+            resultX = 0
+        }
+        if !allUp && !allDown {
+            resultY = 0
+        }
+
+        return (resultX, resultY)
+    }
+
+    private func touchDistance(_ touch: NSTouch) -> (Float, Float) {
+        guard let prevPosition = prevTouchPositions["\(touch.identity)"] else {
+            return (0, 0)
+        }
+        let position = touch.normalizedPosition
+        return (
+            Float(position.x - prevPosition.x),
+            Float(position.y - prevPosition.y)
+        )
+    }
+}
