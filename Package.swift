@@ -5,5 +5,6 @@ let package = Package(name: "AeroGrid", platforms: [.macOS(.v14)], products: [
 ], targets: [
     .target(name: "GridCore"),
     .executableTarget(name: "AeroGrid", dependencies: ["GridCore"]),
+    .testTarget(name: "AeroGridTests", dependencies: ["AeroGrid"]),
     .testTarget(name: "GridCoreTests", dependencies: ["GridCore"], resources: [.copy("Fixtures")]),
 ], swiftLanguageModes: [.v5])

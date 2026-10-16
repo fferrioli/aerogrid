@@ -30,7 +30,9 @@ final class BufferedLog {
     private func flushBuffer() {
         guard !buffer.isEmpty else { return }
         let manager = FileManager.default
-        if let size = try? url.resourceValues(forKeys:[.fileSizeKey]).fileSize, size+buffer.count > limit {
+        // URL resource values can retain the pre-rotation size after the file is replaced.
+        let size = (try? manager.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+        if size + buffer.count > limit {
             let previous = url.appendingPathExtension("previous")
             try? manager.removeItem(at:previous); try? manager.moveItem(at:url,to:previous)
         }

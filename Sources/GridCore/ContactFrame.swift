@@ -29,6 +29,13 @@ public struct ContactFrameRecognizer {
     private var recognizer = ContactGestureRecognizer()
     private var context:Context?
     private var releasing = false
+    private struct PendingReposition {
+        let contacts: [TouchContact]
+        let lifted: Set<String>
+        let landings: Set<String>
+        let timestamp: TimeInterval
+    }
+    private var pendingReposition: PendingReposition?
     private var lastFullPacket:TimeInterval?
     private var intervals:[TimeInterval] = []
     private var stationarySince:TimeInterval?
@@ -57,7 +64,7 @@ public struct ContactFrameRecognizer {
             return []
         }
         var events:[ContactGestureEvent] = []
-        resumeRepositionedContacts(contacts,timestamp:timestamp)
+        let contacts = resumeRepositionedContacts(contacts,timestamp:timestamp)
         restingSeen.formUnion(contacts.filter { $0.resting && members[$0.sample.id] == nil }.map { $0.sample.id })
         let active = contacts.filter { $0.phase != .ended && $0.phase != .cancelled && !$0.resting }
         for contact in active where contact.phase == .began { retired.remove(contact.sample.id) }
@@ -111,31 +118,41 @@ public struct ContactFrameRecognizer {
         guard timestamp-max(end,lastAlive) >= max(0.06,min(0.12,cadence*4)) else { return [] }
         return finish("corroborated-lift-settled")
     }
-    private mutating func resumeRepositionedContacts(_ contacts:[TouchContact],timestamp:TimeInterval) {
-        guard releasing, !majorityLifted else { return }
+    private mutating func resumeRepositionedContacts(_ contacts: [TouchContact], timestamp: TimeInterval) -> [TouchContact] {
+        guard releasing, !majorityLifted else { pendingReposition = nil; return contacts }
         let alive = Set(members.filter { !$0.value.ended }.keys)
         let lifted = Set(members.filter { $0.value.ended }.keys)
-        let down = Set(contacts.filter { $0.phase != .ended && $0.phase != .cancelled }.map { $0.sample.id })
+        let down = Set(contacts.filter { $0.phase != .ended && $0.phase != .cancelled }.map(\.sample.id))
+        if let pending = pendingReposition, pending.lifted == lifted, timestamp > pending.timestamp,
+           alive.count >= 2, alive.isSubset(of: down),
+           pending.landings.allSatisfy({ id in contacts.contains { $0.sample.id == id && !$0.resting && ($0.phase == .moved || $0.phase == .stationary) } }) {
+            // A later contact frame confirms the landing. Rebase to its original positions
+            // so the confirming movement is retained, without counting the reposition itself.
+            for id in lifted { members.removeValue(forKey: id) }
+            retired.formUnion(lifted.subtracting(pending.landings))
+            for contact in pending.contacts where alive.contains(contact.sample.id) || pending.landings.contains(contact.sample.id) {
+                retired.remove(contact.sample.id)
+                members[contact.sample.id] = Member(sample: contact.sample, updated: pending.timestamp)
+            }
+            pendingReposition = nil
+            releasing = false; releaseEnd = nil; stationarySince = nil; lastFullPacket = nil; intervals.removeAll()
+            recognizer.resumeContacts(members.values.map(\.sample)); decisionReason = "held-contact-repositioned"
+            return contacts
+        }
         let landings = contacts.filter {
             $0.phase == .began && !$0.resting && !alive.contains($0.sample.id) && !restingSeen.contains($0.sample.id)
         }
-        // At least two fingers continuously remain down. An explicit replacement landing
-        // resumes this held cohort; a stale .moved snapshot never resurrects a lifted finger.
-        guard alive.count >= 2, alive.isSubset(of:down), !lifted.isEmpty, landings.count == lifted.count else { return }
-        let landingIDs = Set(landings.map { $0.sample.id })
-        for id in lifted { members.removeValue(forKey:id) }
-        retired.formUnion(lifted.subtracting(landingIDs))
-        for contact in landings {
-            retired.remove(contact.sample.id)
-            members[contact.sample.id] = Member(sample:contact.sample,updated:timestamp)
+        if alive.count >= 2, alive.isSubset(of: down), !lifted.isEmpty, landings.count == lifted.count {
+            let ids = Set(landings.map(\.sample.id))
+            if pendingReposition?.landings != ids || pendingReposition?.lifted != lifted {
+                pendingReposition = PendingReposition(contacts: contacts, lifted: lifted, landings: ids, timestamp: timestamp)
+                decisionReason = "held-contact-recontact-pending"
+            }
         }
-        // Rebase all current contacts so their new positions do not become a phantom swipe.
-        for contact in contacts where alive.contains(contact.sample.id) {
-            members[contact.sample.id]?.sample = contact.sample
-            members[contact.sample.id]?.updated = timestamp
-        }
-        releasing = false; releaseEnd = nil; stationarySince = nil; lastFullPacket = nil; intervals.removeAll()
-        recognizer.resumeContacts(members.values.map(\.sample)); decisionReason = "held-contact-repositioned"
+        // Native delivery can replay .began after .ended. One such snapshot is not
+        // proof that a finger landed again: keep its lift sticky until confirmed.
+        let unconfirmed = pendingReposition?.landings ?? []
+        return contacts.filter { !unconfirmed.contains($0.sample.id) }
     }
     private mutating func updateStroke(_ contacts:[TouchContact],timestamp:TimeInterval) {
         guard !releasing, !contacts.contains(where: { $0.phase == .began || $0.phase == .ended || $0.phase == .cancelled }) else {
@@ -178,7 +195,7 @@ public struct ContactFrameRecognizer {
     private mutating func retireCohort() {
         if retired.count > 64 { retired.removeAll() }
         retired.formUnion(members.keys); retired.formUnion(restingSeen)
-        members.removeAll(); context = nil; restingSeen.removeAll(); releasing = false
+        members.removeAll(); context = nil; restingSeen.removeAll(); releasing = false; pendingReposition = nil
         lastFullPacket = nil; stationarySince = nil; releaseEnd = nil; intervals.removeAll(); recognizer.reset()
     }
 }

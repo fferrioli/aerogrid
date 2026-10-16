@@ -13,7 +13,7 @@ AeroGrid separates spatial organization from the window engine. The native menu 
 
 ## Navigation and gestures
 
-The input layer recognizes configured contact cohorts and freezes the display target at gesture start. A quick flick chooses one neighbor. Continued deliberate movement after the hold threshold explores additional candidates. Selection is previewed during contact; only the final target is committed at release.
+The input layer recognizes configured contact cohorts and freezes the display target at gesture start. A reported recontact remains provisional until a later contact frame confirms it alongside the fingers that stayed down. Repeated native landing snapshots cannot erase an earlier lift. A quick flick chooses one neighbor. Continued deliberate movement after the hold threshold explores additional candidates. Selection is previewed during contact; only the final target is committed at release.
 
 For a stable desktop, committing a gesture captures only the departing and arriving layouts. A fresh window inventory validates membership and display ownership before switching; topology changes, backend restarts, fullscreen changes, and pending recovery use complete reconciliation. The coordinated-target preflight, post-switch visibility checks, and rollback remain active. Command completion uses process-exit notification rather than a polling sleep. Local navigation timings distinguish queue time from execution time.
 
