@@ -40,6 +40,14 @@ On disconnect, normal gestures reach the adapted spaces without a modifier. Reco
 
 See the [Spanish recovery guide](recovery.es.md). A standalone Python tool can back up and repair the adapted map on an older installation, keep the window service running, and refresh saved observations from the live backend without rebuilding or changing permissions. The corrected app repairs conflicting adapted positions on load and refresh, and releases stale adapted positions when dormant spaces reappear.
 
+## Automatic spaces leave large gaps
+
+Update both AeroGrid and its bundled backend. New discoveries and generated fullscreen/split destinations now use a nearby free edge rather than the board's farthest column or an unused legacy slot. Existing arrangements stay in place: drag a space by its header to close an older gap or insert it beside another space. Navigation skips unassigned holes.
+
+## Closing a window changes the workspace where an app reopens
+
+The updated owned backend keeps the active workspace through automatic macOS focus fallback after closing a normal window. It can remain empty while the app restarts. A deliberate click, key press, or AeroGrid navigation releases that protection; a window reopening before you navigate uses the current workspace. This does not impose a permanent app-to-workspace rule, and native fullscreen exits still follow macOS's Space transition. Report an unexpected switch with the steps and whether you interacted between closure and relaunch; no work-window titles are needed.
+
 ## Update
 
 Quit AeroGrid from its menu, update this checkout, rebuild, and install:

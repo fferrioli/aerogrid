@@ -19,6 +19,95 @@ index 960a943..6b1d841 100644
  struct AeroSpaceApp: App {
      @StateObject var viewModel = TrayMenuModel.shared
      @StateObject var messageModel = MessageModel.shared
+diff --git a/Sources/AppBundle/GridFocusRecovery.swift b/Sources/AppBundle/GridFocusRecovery.swift
+new file mode 100644
+index 0000000..b9244a9
+--- /dev/null
++++ b/Sources/AppBundle/GridFocusRecovery.swift
+@@ -0,0 +1,83 @@
++import AppKit
++
++/// macOS can activate a hidden app when a window closes. That fallback is not a
++/// request to switch AeroGrid spaces, and must not decide where a relaunch opens.
++@MainActor final class GridFocusRecovery {
++    private struct ClosedWindow: Equatable {
++        var id: UInt32
++        var pid: Int32
++        init(_ window: Window) { id = window.windowId; pid = window.app.pid }
++    }
++    private var heldWorkspace: Workspace?
++    private var inputAtClose: [UInt32] = []
++    private var handledClosure: ClosedWindow?
++    private let enabled: () -> Bool
++    private let windowExists: @MainActor (Window) async throws -> Bool?
++    private let inputCounters: () -> [UInt32]
++
++    init(enabled: @escaping () -> Bool = { gridOwnsBackendUI() },
++         windowExists: @escaping @MainActor (Window) async throws -> Bool? = gridWindowStillExists,
++         inputCounters: @escaping () -> [UInt32] = gridFocusInputCounters) {
++        self.enabled = enabled
++        self.windowExists = windowExists
++        self.inputCounters = inputCounters
++    }
++
++    func shouldFollow(_ native: Window?, current: LiveFocus) async throws -> Bool {
++        guard enabled() else { heldWorkspace = nil; return true }
++        if let heldWorkspace {
++            if !heldWorkspace.isVisible || current.workspace !== heldWorkspace || inputCounters() != inputAtClose {
++                self.heldWorkspace = nil
++                return true
++            }
++            if native?.visualWorkspace === heldWorkspace {
++                if let native, ClosedWindow(native) != handledClosure { self.heldWorkspace = nil }
++                return true
++            }
++            return false
++        }
++        guard let closing = current.windowOrNil,
++              native?.visualWorkspace !== current.workspace,
++              closing.layoutReason == .standard,
++              closing.parent is TilingContainer || closing.parent is FloatingWindowsContainer,
++              ClosedWindow(closing) != handledClosure else { return true }
++        let inputBeforeQuery = inputCounters()
++        let exists = try await windowExists(closing)
++        // A user command may run while AX responds. Never apply its older native
++        // focus sample over that deliberate selection.
++        guard focus.workspace === current.workspace, focus.windowOrNil === closing,
++              inputCounters() == inputBeforeQuery else { return false }
++        guard exists == false else { return true }
++        holdAfterClose(closing, workspace: current.workspace)
++        return heldWorkspace == nil
++    }
++
++    func holdAfterClose(_ closing: Window, workspace: Workspace) {
++        guard enabled(), workspace.isVisible, ClosedWindow(closing) != handledClosure else { return }
++        handledClosure = ClosedWindow(closing)
++        heldWorkspace = workspace
++        inputAtClose = inputCounters()
++    }
++
++    func willSetFocus(to workspace: Workspace) {
++        if workspace !== heldWorkspace { heldWorkspace = nil }
++    }
++}
++
++@MainActor var gridFocusRecovery = GridFocusRecovery()
++
++private func gridFocusInputCounters() -> [UInt32] {
++    // Counts only, never keyboard contents. Mouse-up from the closing click must
++    // not release the hold; a new click/key press or explicit navigation does.
++    [CGEventType.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].map {
++        CGEventSource.counterForEventType(.combinedSessionState, eventType: $0)
++    }
++}
++
++@MainActor private func gridWindowStillExists(_ window: Window) async throws -> Bool? {
++    guard let window = window as? MacWindow else { return nil }
++    // AX can report destruction before WindowServer's closing animation ends.
++    // Use the same liveness check as garbage collection, only on a proposed
++    // cross-space fallback. Normal status polling adds no AX query.
++    return try await window.macApp.gridWindowIsAlive(window.windowId, .cancellable)
++}
 diff --git a/Sources/AppBundle/OwnedGridBackend.swift b/Sources/AppBundle/OwnedGridBackend.swift
 new file mode 100644
 index 0000000..345ff8c
@@ -711,6 +800,41 @@ index 6645df4..06eaf0c 100644
 +    let url: URL = launchAgentsDir.appending(path: "\(aeroSpaceAppId).plist")
      try? FileManager.default.removeItem(at: url)
  }
+diff --git a/Sources/AppBundle/focus.swift b/Sources/AppBundle/focus.swift
+index 875b46b..9db87f2 100644
+--- a/Sources/AppBundle/focus.swift
++++ b/Sources/AppBundle/focus.swift
+@@ -61,6 +61,7 @@ private struct FrozenFocus: AeroAny, Equatable, Sendable {
+ @MainActor var focus: LiveFocus { _focus.live }
+ 
+ @MainActor func setFocus(to newFocus: LiveFocus) -> Bool {
++    gridFocusRecovery.willSetFocus(to: newFocus.workspace)
+     if _focus == newFocus.frozen { return true }
+     let oldFocus = focus
+     // Normalize mruWindow when focus away from a workspace
+diff --git a/Sources/AppBundle/focusCache.swift b/Sources/AppBundle/focusCache.swift
+index d70519e..697e3db 100644
+--- a/Sources/AppBundle/focusCache.swift
++++ b/Sources/AppBundle/focusCache.swift
+@@ -3,13 +3,16 @@
+ /// The data should flow (from nativeFocused to focused) and
+ ///                      (from nativeFocused to lastKnownNativeFocusedWindowId)
+ /// Alternative names: takeFocusFromMacOs, syncFocusFromMacOs
+-@MainActor func updateFocusCache(_ nativeFocused: Window?) {
++@MainActor func updateFocusCache(_ nativeFocused: Window?) async throws {
+     if nativeFocused?.parent is MacosPopupWindowsContainer {
+         return
+     }
++    guard try await gridFocusRecovery.shouldFollow(nativeFocused, current: focus) else { return }
+     if nativeFocused?.windowId != lastKnownNativeFocusedWindowId {
+         _ = nativeFocused?.focusWindow()
+         lastKnownNativeFocusedWindowId = nativeFocused?.windowId
+     }
+-    nativeFocused?.macAppUnsafe.lastNativeFocusedWindowId = nativeFocused?.windowId
++    if let app = nativeFocused?.app as? MacApp {
++        app.lastNativeFocusedWindowId = nativeFocused?.windowId
++    }
+ }
 diff --git a/Sources/AppBundle/initAppBundle.swift b/Sources/AppBundle/initAppBundle.swift
 index bfc971d..3115ed7 100644
 --- a/Sources/AppBundle/initAppBundle.swift
@@ -762,6 +886,28 @@ index 41756e5..25fc73c 100644
              let rawGap = context.resolvedGaps.inner.get(orientation).toDouble()
              // Gaps. Consider 4 cases:
              // 1. Multiple children. Layout first child
+diff --git a/Sources/AppBundle/layout/refresh.swift b/Sources/AppBundle/layout/refresh.swift
+index 5e10321..d857ec4 100644
+--- a/Sources/AppBundle/layout/refresh.swift
++++ b/Sources/AppBundle/layout/refresh.swift
+@@ -34,7 +34,7 @@ func runHeavyCompleteRefreshSession(
+         try await $refreshSessionEvent.withValue(event) {
+             let nativeFocused = try await getNativeFocusedWindow(.cancellable)
+             if let nativeFocused { try await debugWindowsIfRecording(nativeFocused, .cancellable) }
+-            updateFocusCache(nativeFocused)
++            try await updateFocusCache(nativeFocused)
+ 
+             if shouldLayoutWorkspaces && optimisticallyPreLayoutWorkspaces { try await layoutWorkspaces() }
+ 
+@@ -68,7 +68,7 @@ func runLightSession<T>(
+     return try await $refreshSessionEvent.withValue(event) {
+         let nativeFocused = try await getNativeFocusedWindow(.cancellable)
+         if let nativeFocused { try await debugWindowsIfRecording(nativeFocused, .cancellable) }
+-        updateFocusCache(nativeFocused)
++        try await updateFocusCache(nativeFocused)
+         let focusBefore = focus.windowOrNil
+ 
+         await refreshModel_nonCancellable()
 diff --git a/Sources/AppBundle/normalizeLayoutReason.swift b/Sources/AppBundle/normalizeLayoutReason.swift
 index 3069eff..4bc215d 100644
 --- a/Sources/AppBundle/normalizeLayoutReason.swift
@@ -809,7 +955,7 @@ index fc7bed7..0e1f297 100644
              await answerToClient(
                  exitCode: EXIT_CODE_TWO,
 diff --git a/Sources/AppBundle/tree/MacApp.swift b/Sources/AppBundle/tree/MacApp.swift
-index 94abdf7..3c0da1a 100644
+index 94abdf7..03bf874 100644
 --- a/Sources/AppBundle/tree/MacApp.swift
 +++ b/Sources/AppBundle/tree/MacApp.swift
 @@ -49,6 +49,8 @@ final class MacApp: AbstractApp {
@@ -821,8 +967,23 @@ index 94abdf7..3c0da1a 100644
          let pid = nsApp.processIdentifier
          // AX requests crash if you send them to yourself
          if pid == myPid { return nil }
+@@ -116,6 +118,14 @@ final class MacApp: AbstractApp {
+         }
+     }
+ 
++    func gridWindowIsAlive(_ windowId: UInt32, _ cm: CancellationMode) async throws -> Bool? {
++        if nsApp.isTerminated { return false }
++        return try await thread?.runInLoop(cm) { [windows] job in
++            guard let window = windows.threadGuarded[windowId] else { return false }
++            return window.ax.containingWindowId() == windowId
++        }
++    }
++
+     // todo merge together with detectNewWindows
+     func getFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
+         let windowId = try await thread?.runInLoop(cm) { [nsApp, axApp, windows] job in
 diff --git a/Sources/AppBundle/tree/MacWindow.swift b/Sources/AppBundle/tree/MacWindow.swift
-index 94143ef..76b05ee 100644
+index 94143ef..db594d4 100644
 --- a/Sources/AppBundle/tree/MacWindow.swift
 +++ b/Sources/AppBundle/tree/MacWindow.swift
 @@ -1,6 +1,14 @@
@@ -840,7 +1001,12 @@ index 94143ef..76b05ee 100644
  final class MacWindow: Window {
      let macApp: MacApp
      private var prevUnhiddenProportionalPositionInsideWorkspaceRect: CGPoint?
-@@ -81,6 +89,7 @@ final class MacWindow: Window {
+@@ -77,15 +85,17 @@ final class MacWindow: Window {
+     //                        If you are unsure, it's better to pass `false`
+     @MainActor
+     func garbageCollect(skipClosedWindowsCache: Bool) {
++        let wasFocused = focus.windowOrNil === self
+         if MacWindow.allWindowsMap.removeValue(forKey: windowId) == nil {
              return
          }
          if !skipClosedWindowsCache { cacheClosedWindowIfNeeded() }
@@ -848,7 +1014,24 @@ index 94143ef..76b05ee 100644
          let parent = unbindFromParent().parent
          let deadWindowWorkspace = parent.nodeWorkspace
          let focus = focus
-@@ -164,17 +173,9 @@ final class MacWindow: Window {
+         if let deadWindowWorkspace, deadWindowWorkspace == focus.workspace ||
+-            deadWindowWorkspace == prevFocusedWorkspace && prevFocusedWorkspaceDate.distance(to: .now) < 1
++            !gridOwnsBackendUI() && deadWindowWorkspace == prevFocusedWorkspace && prevFocusedWorkspaceDate.distance(to: .now) < 1
+         {
+             switch parent.cases {
+                 case .tilingContainer, .floatingWindowsContainer, .macosHiddenAppsWindowsContainer, .macosFullscreenWindowsContainer:
+@@ -103,6 +113,10 @@ final class MacWindow: Window {
+                     break
+             }
+         }
++        if wasFocused, let deadWindowWorkspace,
++           parent is TilingContainer || parent is FloatingWindowsContainer {
++            gridFocusRecovery.holdAfterClose(self, workspace: deadWindowWorkspace)
++        }
+     }
+ 
+     override func getTitle(_ cm: CancellationMode) async throws -> String { try await macApp.getAxTitle(windowId, cm) ?? "" }
+@@ -164,17 +178,9 @@ final class MacWindow: Window {
              // Just a small optimization to avoid unnecessary AX calls for non floating windows
              // Tiling windows should be unhidden with layoutRecursive anyway
              case .floatingWindow:
@@ -869,7 +1052,7 @@ index 94143ef..76b05ee 100644
              case .macosNativeFullscreenWindow, .macosNativeHiddenAppWindow, .macosNativeMinimizedWindow,
                   .macosPopupWindow, .tiling, .rootTilingContainer, .shimContainerRelation: break
          }
-@@ -197,6 +198,14 @@ final class MacWindow: Window {
+@@ -197,6 +203,14 @@ final class MacWindow: Window {
      override func getAxRect(_ cm: CancellationMode) async throws -> Rect? {
          try await macApp.getAxRect(windowId, cm)
      }
@@ -884,7 +1067,7 @@ index 94143ef..76b05ee 100644
  }
  
  extension Window {
-@@ -247,17 +256,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
+@@ -247,17 +261,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
               .macosFullscreenWindowsContainer, .macosHiddenAppsWindowsContainer:
              let layout = global_layoutForNextDetectedWindow
              global_layoutForNextDetectedWindow = nil
@@ -1040,6 +1223,164 @@ index 9d0d606..f56fc66 100644
  protocol ReadableAttr: Sendable {
      associatedtype T
      var getter: @Sendable (AnyObject) -> T? { get }
+diff --git a/Sources/AppBundleTests/GridFocusRecoveryTest.swift b/Sources/AppBundleTests/GridFocusRecoveryTest.swift
+new file mode 100644
+index 0000000..ac1db6e
+--- /dev/null
++++ b/Sources/AppBundleTests/GridFocusRecoveryTest.swift
+@@ -0,0 +1,152 @@
++@testable import AppBundle
++import XCTest
++
++@MainActor final class GridFocusRecoveryTest: XCTestCase {
++    private var alive: Set<UInt32> = []
++    private var input: UInt32 = 0
++
++    override func setUp() async throws {
++        setUpWorkspacesForTests()
++        gridFocusRecovery = GridFocusRecovery(enabled: { true }, windowExists: { [unowned self] in
++            self.alive.contains($0.windowId)
++        }, inputCounters: { [unowned self] in [self.input] })
++    }
++
++    override func tearDown() async throws { gridFocusRecovery = GridFocusRecovery() }
++
++    private func pair() async throws -> (Workspace, TestWindow, Workspace, TestWindow) {
++        let source = Workspace.get(byName: "grid-source")
++        let other = Workspace.get(byName: "grid-other")
++        let closing = TestWindow.new(id: 9101, parent: source.rootTilingContainer)
++        let fallback = TestWindow.new(id: 9102, parent: other.rootTilingContainer)
++        alive = [closing.windowId, fallback.windowId]
++        _ = closing.focusWindow()
++        try await updateFocusCache(closing)
++        return (source, closing, other, fallback)
++    }
++
++    func testAutomaticFallbackDoesNotSwitchSpaceAndRelaunchUsesSource() async throws {
++        let (source, closing, other, fallback) = try await pair()
++        alive.remove(closing.windowId)
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === source)
++        XCTAssertFalse(other.isVisible)
++        closing.unbindFromParent()
++        for _ in 0..<5 { try await updateFocusCache(fallback) }
++        XCTAssertTrue(focus.workspace === source)
++        let reopened = TestWindow.new(id: 9103, parent: focus.workspace.rootTilingContainer)
++        alive.insert(reopened.windowId)
++        try await updateFocusCache(reopened)
++        XCTAssertTrue(reopened.nodeWorkspace === source)
++        XCTAssertTrue(focus.windowOrNil === reopened)
++    }
++
++    func testNextKeyOrClickReleasesFallbackHold() async throws {
++        let (_, closing, other, fallback) = try await pair()
++        alive.remove(closing.windowId)
++        try await updateFocusCache(fallback)
++        input += 1
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === other)
++    }
++
++    func testGestureOrExplicitWorkspaceChoiceReleasesHoldWithoutInputEvent() async throws {
++        let (_, closing, other, fallback) = try await pair()
++        alive.remove(closing.windowId)
++        try await updateFocusCache(fallback)
++        _ = other.focusWorkspace()
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === other)
++    }
++
++    func testBackgroundClosureDoesNotUndoRecentNavigation() async throws {
++        let (source, closing, other, fallback) = try await pair()
++        _ = fallback.focusWindow()
++        closing.unbindFromParent()
++        alive.remove(closing.windowId)
++        // A closed background window must not resurrect the old one-second
++        // previous-workspace heuristic after an intentional workspace change.
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === other)
++        XCTAssertFalse(source.isVisible)
++    }
++
++    func testLivingWindowStillAllowsCmdTabOrDockActivation() async throws {
++        let (_, _, other, fallback) = try await pair()
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === other)
++    }
++
++    func testCollectionBeforeNativeFocusAlsoPreservesEmptyWorkspace() async throws {
++        let (source, closing, _, fallback) = try await pair()
++        closing.unbindFromParent()
++        alive.remove(closing.windowId)
++        gridFocusRecovery.holdAfterClose(closing, workspace: source)
++        try await updateFocusCache(nil)
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === source)
++        XCTAssertNil(focus.windowOrNil)
++    }
++
++    func testSurvivingWindowInSameSpaceIsNotBlocked() async throws {
++        let (source, closing, _, fallback) = try await pair()
++        let survivor = TestWindow.new(id: 9104, parent: source.rootTilingContainer)
++        alive.remove(closing.windowId)
++        alive.insert(survivor.windowId)
++        try await updateFocusCache(fallback)
++        closing.unbindFromParent()
++        try await updateFocusCache(survivor)
++        XCTAssertTrue(focus.workspace === source)
++        XCTAssertTrue(focus.windowOrNil === survivor)
++    }
++
++    func testNativeFullscreenExitIsNotIntercepted() async throws {
++        let (_, closing, other, fallback) = try await pair()
++        closing.bind(to: closing.nodeWorkspace!.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
++        alive.remove(closing.windowId)
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === other)
++    }
++
++    func testUnrelatedAeroSpaceAndUnknownWindowMetadataRetainNormalBehavior() async throws {
++        for (enabled, exists) in [(false, false as Bool?), (true, nil)] {
++            let (_, _, other, fallback) = try await pair()
++            gridFocusRecovery = GridFocusRecovery(enabled: { enabled }, windowExists: { _ in exists }, inputCounters: { [] })
++            try await updateFocusCache(fallback)
++            XCTAssertTrue(focus.workspace === other)
++        }
++    }
++
++    func testSameSpaceStatusPollingDoesNotQueryAXLiveness() async throws {
++        let (_, current, _, _) = try await pair()
++        var queries = 0
++        gridFocusRecovery = GridFocusRecovery(enabled: { true }, windowExists: { _ in
++            queries += 1
++            return true
++        }, inputCounters: { [] })
++        for _ in 0..<20 { try await updateFocusCache(current) }
++        XCTAssertEqual(queries, 0)
++    }
++
++    func testUserNavigationWhileLivenessQueryIsPendingWins() async throws {
++        let (_, _, _, fallback) = try await pair()
++        let chosen = Workspace.get(byName: "grid-chosen")
++        gridFocusRecovery = GridFocusRecovery(enabled: { true }, windowExists: { _ in
++            _ = chosen.focusWorkspace()
++            return false
++        }, inputCounters: { [] })
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.workspace === chosen)
++    }
++
++    func testSameSpaceWindowChoiceWhileQueryIsPendingAlsoWins() async throws {
++        let (source, _, _, fallback) = try await pair()
++        let chosen = TestWindow.new(id: 9105, parent: source.rootTilingContainer)
++        gridFocusRecovery = GridFocusRecovery(enabled: { true }, windowExists: { _ in
++            _ = chosen.focusWindow()
++            return true
++        }, inputCounters: { [] })
++        try await updateFocusCache(fallback)
++        XCTAssertTrue(focus.windowOrNil === chosen)
++    }
++}
 diff --git a/Sources/AppBundleTests/command/GridLayoutCommandTest.swift b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
 new file mode 100644
 index 0000000..610be73

@@ -19,7 +19,11 @@ extension DynamicEngineTests {
     }
     func testNavigationPreparationDoesNotGrowWithUnrelatedSpaces() throws {
         for count in [0, 30] {
-            let unrelated = (0..<count).map { WindowInfo(id: UInt32(100 + $0), workspace: "unrelated-\($0)") }
+            let unrelated = (0..<count).map { index in
+                var window = WindowInfo(id: UInt32(100 + index), workspace: "unrelated-\(index)")
+                window.monitor = laptop.monitor // Keep the measured gesture's source/destination on the other board.
+                return window
+            }
             backend.setWindows(backend.screen.windows! + unrelated)
             let selection = try navigationSelection()
             let targetID = try XCTUnwrap(selection.selected[ultra.id]?.spaceID)

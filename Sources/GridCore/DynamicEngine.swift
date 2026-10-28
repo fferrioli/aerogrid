@@ -112,7 +112,10 @@ public final class DynamicEngine {
                 let space = map.spaces[index]
                 guard desktop.windows?.contains(where: { $0.workspace == space.workspace }) == true || desktop.visible.values.contains(space.workspace) else { continue }
                 var next = map
-                if !next.fits(space.rect, board: space.board, excluding: [space.id]) { next.spaces[index].rect = next.frontier(near: space) }
+                if !next.fits(space.rect, board: space.board, excluding: [space.id]) {
+                    let occupied = next.spaces.filter { $0.board == space.board && !$0.isDormant && $0.id != space.id }.map(\.rect)
+                    next.spaces[index].rect = SpacePlacement.nearestVacancy(near: space.rect, occupied: occupied, width: space.rect.width, height: space.rect.height)
+                }
                 next.spaces[index].dormant = false
                 next.spaces[index].foldedRect = nil // A dormant slot no longer reserves its old adapted position.
                 state.dynamicMap = next
@@ -241,10 +244,19 @@ public final class DynamicEngine {
                 ?? desktop.displays.first { desktop.visible[$0.monitor] == workspace }
                 ?? desktop.displays.first { $0.monitor == desktop.focusedMonitor } ?? desktop.displays.first
             let preferredRole = display.map(role) ?? "builtin"
-            let anchor = map.spaces.last { $0.preferredRole == preferredRole } ?? map.spaces.last!
-            let position = map.vacant(near: anchor)
+            let anchor = display.flatMap { currentSpace(on: $0) }.flatMap { desktop.displays.count == 1 || $0.board == preferredRole ? $0 : nil }
+                ?? map.spaces.last { $0.board == preferredRole && !$0.isDormant }
+                ?? map.spaces.last { $0.board == preferredRole } ?? map.spaces.last!
+            var boardAnchor = anchor
+            boardAnchor.boardID = preferredRole
+            let position = map.vacant(near: boardAnchor)
             let name = workspace.allSatisfy(\.isNumber) ? (window?.appName ?? "Espacio") : workspace
-            let space = Space(name: name, row: position.row, column: position.column, workspace: workspace, preferredRole: preferredRole)
+            var space = Space(name: name, row: position.row, column: position.column, workspace: workspace, preferredRole: preferredRole)
+            if desktop.displays.count == 1 {
+                let projected = map.projectedSpaces(combined: true).filter { !$0.isDormant }
+                let origin = projected.first { $0.id == anchor.id }?.rect ?? anchor.rect
+                space.foldedRect = SpacePlacement.nearestVacancy(near: origin, occupied: projected.map(\.rect))
+            }
             editMap { $0.spaces.append(space) }
         }
     }

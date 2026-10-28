@@ -61,6 +61,7 @@ private struct FrozenFocus: AeroAny, Equatable, Sendable {
 @MainActor var focus: LiveFocus { _focus.live }
 
 @MainActor func setFocus(to newFocus: LiveFocus) -> Bool {
+    gridFocusRecovery.willSetFocus(to: newFocus.workspace)
     if _focus == newFocus.frozen { return true }
     let oldFocus = focus
     // Normalize mruWindow when focus away from a workspace

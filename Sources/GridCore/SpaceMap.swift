@@ -190,7 +190,11 @@ public struct SpaceMap: Codable, Equatable {
         }
     }
     public func vacant(near space: Space) -> (row: Int, column: Int) {
-        if version >= 3 { let rect = frontier(near: space); return (rect.row, rect.column) }
+        if version >= 3 {
+            let occupied = spaces.filter { $0.board == space.board && !$0.isDormant }.map(\.rect)
+            let rect = SpacePlacement.nearestVacancy(near: space.rect, occupied: occupied)
+            return (rect.row, rect.column)
+        }
         let occupied = Set(spaces.map { "\($0.row):\($0.column)" })
         for distance in 1...10000 {
             let candidates = [(space.row, space.column + distance), (space.row + distance, space.column)]

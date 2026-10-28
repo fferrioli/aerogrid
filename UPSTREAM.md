@@ -13,6 +13,8 @@ The helper's existing socket/UI dependencies were not copied into the controller
 
 The fork uses the distinct `local.AeroGrid.Backend` bundle identity and socket namespace. It requests normal macOS Accessibility approval at startup and does not reset TCC permission entries.
 
+The owned backend additionally guards against macOS automatically focusing another workspace after a normal window closes. It checks AX window liveness before adopting a cross-workspace native focus change, releases the guard on new user input or explicit navigation, and does not apply upstream's one-second return-to-previous-workspace heuristic to a background closure. These changes are scoped to AeroGrid's bundle identity; native fullscreen transitions and standalone AeroSpace remain unaffected. Backend regression tests cover closure/relaunch, intentional navigation, and changes occurring while the AX check is pending.
+
 Additional fork fixes preserve unrelated monitors when placing an invisible workspace, retain a native fullscreen activation target through Dock transitions, and expose PID/boot-validated window-home recovery for backend restarts. Window homes awaiting AX discovery are retained until their windows become visible; readiness is withheld until initial backend discovery finishes.
 
 The dynamic-map upgrade extends `grid-layout` to version 2: window inventory with native visibility, `check-target`/`activate-target` selecting normal content or an exact fullscreen window, and `move-window` validating PID/boot before mutation. The backend ignores the `local.AeroGrid` auxiliary control app. Legacy operations remain available for existing diagnostics and snapshot regression tests.

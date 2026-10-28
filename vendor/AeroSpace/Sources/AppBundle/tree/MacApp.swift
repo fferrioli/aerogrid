@@ -118,6 +118,14 @@ final class MacApp: AbstractApp {
         }
     }
 
+    func gridWindowIsAlive(_ windowId: UInt32, _ cm: CancellationMode) async throws -> Bool? {
+        if nsApp.isTerminated { return false }
+        return try await thread?.runInLoop(cm) { [windows] job in
+            guard let window = windows.threadGuarded[windowId] else { return false }
+            return window.ax.containingWindowId() == windowId
+        }
+    }
+
     // todo merge together with detectNewWindows
     func getFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
         let windowId = try await thread?.runInLoop(cm) { [nsApp, axApp, windows] job in

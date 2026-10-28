@@ -22,6 +22,37 @@ public struct SpaceRect: Codable, Equatable, Hashable {
     }
 }
 
+/// Automatic additions use a nearby edge, without moving existing spatial landmarks.
+public enum SpacePlacement {
+    public static func nearestVacancy(near origin: SpaceRect, occupied: [SpaceRect], width: Int = 1, height: Int = 1) -> SpaceRect {
+        var candidates = Set<SpaceRect>()
+        for rect in occupied + [origin] {
+            for row in (rect.row - height + 1)..<rect.bottom {
+                candidates.insert(SpaceRect(row: row, column: rect.right, width: width, height: height))
+                candidates.insert(SpaceRect(row: row, column: rect.column - width, width: width, height: height))
+            }
+            for column in (rect.column - width + 1)..<rect.right {
+                candidates.insert(SpaceRect(row: rect.bottom, column: column, width: width, height: height))
+                candidates.insert(SpaceRect(row: rect.row - height, column: column, width: width, height: height))
+            }
+        }
+        func score(_ rect: SpaceRect) -> (Int, Int, Int, Int, Int) {
+            let gap = max(origin.column - rect.right + 1, rect.column - origin.right + 1, 0)
+                + max(origin.row - rect.bottom + 1, rect.row - origin.bottom + 1, 0)
+            let direction: Int
+            if rect.column >= origin.right { direction = 0 }
+            else if rect.row >= origin.bottom { direction = 1 }
+            else if rect.right <= origin.column { direction = 2 }
+            else { direction = 3 }
+            let alignment = abs(rect.row - origin.row) + abs(rect.column - origin.column)
+            return (gap, direction, alignment, rect.row, rect.column)
+        }
+        return candidates.filter { candidate in
+            candidate.isValid && !occupied.contains { $0.overlaps(candidate) }
+        }.min { score($0) < score($1) } ?? SpaceRect(row: origin.row, column: origin.right, width: width, height: height)
+    }
+}
+
 /// Intent survives a narrow destination; an effective point can be clamped for drawing only.
 public struct NavigationAnchor: Codable, Equatable {
     public var spaceID: String
@@ -196,8 +227,17 @@ extension SpaceMap {
             var copy = space; copy.rect = space.foldedRect!; return copy
         }
         for var space in result where space.foldedRect == nil && !space.isDormant {
+            // A generated child follows its source's adapted position, which may
+            // differ from the canonical board offset after a laptop edit.
+            if let sourceID = space.sourceID,
+               let source = result.first(where: { $0.id == sourceID }),
+               let adaptedSource = placed.first(where: { $0.id == sourceID }) {
+                space.row += adaptedSource.row - source.row
+                space.column += adaptedSource.column - source.column
+            }
             if placed.contains(where: { $0.rect.overlaps(space.rect) }) {
-                space.column = placed.map { $0.rect.right }.max() ?? 0
+                let anchor = placed.first { $0.id == space.sourceID }?.rect ?? space.rect
+                space.rect = SpacePlacement.nearestVacancy(near: anchor, occupied: placed.map(\.rect), width: space.rect.width, height: space.rect.height)
             }
             placed.append(space)
         }

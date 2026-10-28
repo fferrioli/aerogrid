@@ -74,6 +74,34 @@ final class SpatialTests: XCTestCase {
         XCTAssertEqual(map.spaces,before)
         for a in projected { for b in projected where a.id != b.id { XCTAssertFalse(a.rect.overlaps(b.rect)) } }
     }
+    func testAutomaticPlacementStaysNearSourceDespiteDistantColumns() throws {
+        var map = SpaceMap(configuration: Configuration(backendPath: "/unused"))
+        map.version = 3
+        let source = Space(id: "source", name: "Source", row: 0, column: 0, workspace: "source", preferredRole: "external")
+        let distant = Space(id: "distant", name: "Distant", row: 2, column: 8, workspace: "distant", preferredRole: "external")
+        map.spaces = [source, distant]
+        let old = map.spaces
+        let position = map.vacant(near: source)
+        XCTAssertEqual(position.row, 0)
+        XCTAssertEqual(position.column, 1)
+        XCTAssertEqual(map.spaces, old)
+    }
+
+    func testCombinedProjectionPlacesCollisionBesideSourceInsteadOfFarFrontier() throws {
+        var map = SpaceMap(configuration: Configuration(backendPath: "/unused"))
+        map.version = 3
+        var source = Space(id: "source", name: "Source", row: 0, column: 0, workspace: "source", preferredRole: "external")
+        source.foldedRect = SpaceRect(row: 0, column: 0)
+        var child = Space(id: "child", name: "Child", row: 0, column: 1, workspace: "child", preferredRole: "external")
+        child.sourceID = source.id
+        var distant = Space(id: "distant", name: "Distant", row: 0, column: 8, workspace: "distant", preferredRole: "builtin")
+        distant.foldedRect = SpaceRect(row: 1, column: 8)
+        map.spaces = [source, child, distant]
+        let projected = map.projectedSpaces(combined: true)
+        XCTAssertEqual(projected.first { $0.id == child.id }?.rect, SpaceRect(row: 0, column: 1))
+        XCTAssertEqual(projected.first { $0.id == distant.id }?.rect, distant.foldedRect)
+        XCTAssertNil(map.spaces[1].foldedRect)
+    }
 }
 
 final class ContactGestureTests: XCTestCase {

@@ -85,6 +85,7 @@ final class MacWindow: Window {
     //                        If you are unsure, it's better to pass `false`
     @MainActor
     func garbageCollect(skipClosedWindowsCache: Bool) {
+        let wasFocused = focus.windowOrNil === self
         if MacWindow.allWindowsMap.removeValue(forKey: windowId) == nil {
             return
         }
@@ -94,7 +95,7 @@ final class MacWindow: Window {
         let deadWindowWorkspace = parent.nodeWorkspace
         let focus = focus
         if let deadWindowWorkspace, deadWindowWorkspace == focus.workspace ||
-            deadWindowWorkspace == prevFocusedWorkspace && prevFocusedWorkspaceDate.distance(to: .now) < 1
+            !gridOwnsBackendUI() && deadWindowWorkspace == prevFocusedWorkspace && prevFocusedWorkspaceDate.distance(to: .now) < 1
         {
             switch parent.cases {
                 case .tilingContainer, .floatingWindowsContainer, .macosHiddenAppsWindowsContainer, .macosFullscreenWindowsContainer:
@@ -111,6 +112,10 @@ final class MacWindow: Window {
                      .macosMinimizedWindowsContainer: // Don't switch back on minimized windows destruction
                     break
             }
+        }
+        if wasFocused, let deadWindowWorkspace,
+           parent is TilingContainer || parent is FloatingWindowsContainer {
+            gridFocusRecovery.holdAfterClose(self, workspace: deadWindowWorkspace)
         }
     }
 

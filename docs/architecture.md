@@ -23,6 +23,8 @@ Navigation uses space rectangles and remembered entry positions. It skips geomet
 
 Stable space identifiers are independent of display labels and backend workspace names. The map stores board-local geometry, footprints, display ownership, layouts, normal/fullscreen targets, adaptation families, and bounded Undo history. Titles are derived from current apps.
 
+Automatic discoveries and generated fullscreen/split destinations use a nearby free edge of their source. Distant columns and dormant import slots do not push additions to the far side of the board. Combining boards preserves explicit adapted positions and places generated children relative to their adapted source. Existing coordinates and deliberate gaps are not globally compacted.
+
 Organization changes are serialized and validate window ownership using process and boot identity. A pending transaction records rollback state so interrupted changes can recover before accepting new work. Undo checks for later incompatible edits and does not recreate closed windows.
 
 On disconnect, parallel layout groups become neighboring destinations; stacked subtrees remain intact. Family records preserve the original nested arrangement and proportions. Reconnection can recompose unchanged families without overwriting arrangements the user edited.
@@ -34,6 +36,8 @@ The backend has a distinct app identity (`local.AeroGrid.Backend`) and socket na
 Pause/resume acknowledges the engine’s actual management state. Quit stops the owned service. An independently installed AeroSpace remains available but should not manage windows at the same time.
 
 The fork adds versioned inventory, layout snapshot/restore, exact fullscreen targeting, and validated movement. Original AeroSpace entry points retain their upstream behavior. Pins and extension details are in [UPSTREAM.md](../UPSTREAM.md).
+
+For the owned AeroGrid service, closing a focused normal window preserves its workspace through macOS's automatic fallback activation. A proposed cross-space focus change checks the original window's AX liveness; normal same-space polling adds no query. A subsequent input event, explicit workspace selection, or a returning window releases the hold. Event counters contain no keyboard contents. A delayed background-window closure cannot undo a recent deliberate navigation. Native fullscreen exits and independently running AeroSpace retain their normal behavior.
 
 ## Local storage
 
