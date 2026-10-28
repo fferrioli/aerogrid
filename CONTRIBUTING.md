@@ -12,6 +12,7 @@ swift test
 (cd vendor/AeroSpace && swift test)
 python3 -m unittest discover -s Tests/InstallerTests -v
 python3 -m unittest discover -s Tests/RecoveryTests -v
+python3 -m unittest discover -s Tests/UpdateTests -v
 ```
 
 The backend source is vendored directly, including AeroGrid modifications. A normal clone needs no submodule initialization. `scripts/aerospace-grid.patch` records changes against the pinned AeroSpace revision in [UPSTREAM.md](UPSTREAM.md).
@@ -25,6 +26,8 @@ Recorded gesture fixtures use aliased contact identifiers and contain no window 
 For gesture changes, check quick flicks, consecutive flicks, held exploration, reversals, two-finger scrolling, and release/momentum isolation. For layout changes, check moving an app to occupied/empty/new spaces, splitting, stacking, whole-space insertion, resizing, and Undo. For topology changes, check physical disconnect/reconnect and native fullscreen on each display.
 
 Report simulated checks separately from real trackpad and display tests. Do not treat model tests or demo animations as physical acceptance.
+
+For updater changes, cover API failures, archive traversal and symlinks, build failure/cancellation, shutdown handoff, dead-worker recovery, installed build metadata, and configuration preservation. Update tests sign real built products into a temporary home while suppressing LaunchServices registration and all TCC changes; they never replace the running installation. `AeroGrid --verify-status-menu REPORT.json` exercises a separate native status item and verifies all menu rows fit without hover. It starts no window-management service.
 
 ## Protect the live setup
 

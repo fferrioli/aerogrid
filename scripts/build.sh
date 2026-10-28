@@ -5,3 +5,5 @@ swift build -c release
 cd vendor/AeroSpace
 swift build -c release --product AeroSpaceApp
 swift build -c release --product aerospace
+cd ../..
+python3 scripts/build-info.py

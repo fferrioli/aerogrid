@@ -17,7 +17,8 @@ def package(output):
         "vendor/AeroSpace/.build/release/AeroSpaceApp",
         "vendor/AeroSpace/.build/release/aerospace",
         "vendor/AeroSpace/docs/config-examples/default-config.toml",
-        "scripts/install.py", "scripts/uninstall.py", "scripts/configuration.py",
+        "scripts/install.py", "scripts/uninstall.py", "scripts/configuration.py", "scripts/update-worker.py",
+        ".build/build-info.json",
     ]
     for name in files:
         if not (ROOT / name).is_file():

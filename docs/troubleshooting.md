@@ -50,7 +50,9 @@ The updated owned backend keeps the active workspace through automatic macOS foc
 
 ## Update
 
-Quit AeroGrid from its menu, update this checkout, rebuild, and install:
+Use **Actualizar AeroGrid…** from the menu bar icon's right-click menu. An **↑** indicates an update. You can check manually with **Buscar actualizaciones…** and view preparation progress or cancel from that same menu. See the [Spanish updater guide](updates.es.md) for failures and permissions.
+
+For an older installation that does not yet have this menu, quit AeroGrid from its menu, update this checkout, rebuild, and install once:
 
 ```sh
 git pull --ff-only

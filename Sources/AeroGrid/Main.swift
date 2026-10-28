@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 import GridCore
 
-final class ApplicationDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var model: AppModel?
     private var overview: NSWindow?
     private var overviewScreen: NSScreen?
@@ -18,10 +18,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     private var menuObservers: [NSObjectProtocol] = []
     private var quitting = false
     private var statusObservation: AnyCancellable?
+    private var updateObservation: AnyCancellable?
+    var updates: AppUpdates?
+    private var actionsMenu: NSMenu?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         do {
             let model = try AppModel(); self.model = model
+            let updates = AppUpdates(directory: model.directory); self.updates = updates
+            updates.onReadyToInstall = { [weak updates] in
+                guard let updates else { return }
+                do { try updates.handOff(); NSApp.terminate(nil) }
+                catch { updates.fail(error.localizedDescription) }
+            }
             model.showOverview = { [weak self] in self?.openOverview() }
             model.closeOverview = { [weak self] restore in self?.closeOverview(restoreFocus: restore) }
             model.resizeOverview = { [weak self] size in self?.resizeOverview(to:size) }
@@ -29,20 +38,31 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
             status?.button?.image = NSImage(systemSymbolName: "square.grid.3x3", accessibilityDescription: "AeroGrid")
             status?.button?.imagePosition = .imageLeading
             statusObservation = model.$paused.sink { [weak self] paused in
-                self?.status?.button?.title = ""
-                self?.status?.button?.image = NSImage(systemSymbolName:paused ? "pause.circle" : "square.grid.3x3",accessibilityDescription:"AeroGrid")
-                self?.status?.button?.toolTip = paused ? "AeroGrid · En pausa" : "AeroGrid · Tus espacios"
+                self?.refreshStatusButton(paused: paused)
+            }
+            updateObservation = updates.$phase.combineLatest(updates.$candidate).sink { [weak self] _, _ in
+                DispatchQueue.main.async { self?.refreshStatusButton(); self?.refreshActionsMenu() }
             }
             status?.button?.target = self
             status?.button?.action = #selector(statusClicked)
             status?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            accessTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.checkTopAccess() }
+            accessTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.checkTopAccess() }
+            }
             status?.menu = nil
-            menuObservers.append(NotificationCenter.default.addObserver(forName:NSMenu.didBeginTrackingNotification,object:nil,queue:.main) { [weak self] _ in self?.menuDepth += 1; self?.model?.organizationMenuOpen = true })
-            menuObservers.append(NotificationCenter.default.addObserver(forName:NSMenu.didEndTrackingNotification,object:nil,queue:.main) { [weak self] _ in self?.menuDepth = max(0,(self?.menuDepth ?? 1)-1); self?.model?.organizationMenuOpen = (self?.menuDepth ?? 0) > 0 })
+            menuObservers.append(NotificationCenter.default.addObserver(forName:NSMenu.didBeginTrackingNotification,object:nil,queue:.main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.menuDepth += 1; self?.model?.organizationMenuOpen = true }
+            })
+            menuObservers.append(NotificationCenter.default.addObserver(forName:NSMenu.didEndTrackingNotification,object:nil,queue:.main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.menuDepth = max(0, self.menuDepth - 1); self.model?.organizationMenuOpen = self.menuDepth > 0
+                }
+            })
             if let local = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown],handler: { [weak self] event in self?.checkOutsideClick(); return event }) { monitors.append(local) }
             if let global = NSEvent.addGlobalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown],handler: { [weak self] _ in self?.checkOutsideClick() }) { monitors.append(global) }
             model.start()
+            updates.start()
             if !model.inputReady && !model.paused { openSettings() }
         } catch {
             let alert = NSAlert(); alert.messageText = "AeroGrid couldn't start"; alert.informativeText = error.localizedDescription; alert.runModal(); NSApp.terminate(nil)
@@ -50,15 +70,70 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func statusClicked() {
         if NSApp.currentEvent?.type == .rightMouseUp || model?.paused == true {
-            let menu = NSMenu(); menu.autoenablesItems = false
-            for (title, selector) in [("Ajustes…", #selector(openSettings)), ("Recuperar", #selector(recover)), (model?.paused == true ? "Reanudar AeroGrid" : "Pausar AeroGrid", #selector(togglePause)), ("Salir de AeroGrid", #selector(quit))] {
-                let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self
-                if selector == #selector(togglePause) { item.isEnabled = model?.pauseChanging != true }
-                menu.addItem(item)
-            }
-            if let button = status?.button { menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY), in: button) }
+            showActionsMenu()
         } else if overview?.isVisible == true { closeOverview(restoreFocus: true) }
         else { openOverview() }
+    }
+    private func showActionsMenu() {
+        let menu = makeActionsMenu(); menu.delegate = self; actionsMenu = menu
+        // Let the status item place its menu below the menu bar. A manual
+        // popup at bounds.maxY can start above the screen and show scroll arrows.
+        status?.menu = menu
+        status?.button?.performClick(nil)
+    }
+    func makeActionsMenu() -> NSMenu {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        func add(_ title: String, _ action: Selector) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self
+            menu.addItem(item)
+        }
+        add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover))
+        add(model?.paused == true ? "Reanudar AeroGrid" : "Pausar AeroGrid", #selector(togglePause))
+        menu.addItem(.separator())
+        add(updates?.primaryTitle ?? "Buscar actualizaciones…", #selector(updatePrimary))
+        add("Buscar actualizaciones…", #selector(checkUpdates))
+        add("Cancelar actualización", #selector(cancelUpdate))
+        add("Detalles de la actualización…", #selector(updateDetails))
+        add("Buscar actualizaciones automáticamente", #selector(toggleAutomaticUpdates))
+        menu.addItem(.separator()); add("Salir de AeroGrid", #selector(quit))
+        refreshActionsMenu(menu)
+        return menu
+    }
+    private func refreshActionsMenu(_ supplied: NSMenu? = nil) {
+        guard let menu = supplied ?? actionsMenu else { return }
+        for item in menu.items {
+            switch item.action {
+            case #selector(togglePause): item.isEnabled = model?.pauseChanging != true
+            case #selector(updatePrimary):
+                item.title = updates?.primaryTitle ?? "Buscar actualizaciones…"
+                item.isEnabled = updates?.canInstall == true || updates?.phase == .idle || updates?.phase == .failed
+                if updates?.canInstall == true { item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil) }
+            case #selector(checkUpdates):
+                item.isHidden = updates?.canInstall != true && updates?.phase != .current && updates?.phase != .complete
+                item.isEnabled = updates?.phase.isBusy != true && updates?.phase != .checking
+            case #selector(cancelUpdate): item.isHidden = updates?.canCancel != true
+            case #selector(updateDetails): item.isHidden = updates?.detail.isEmpty != false
+            case #selector(toggleAutomaticUpdates): item.state = updates?.automatic == true ? .on : .off
+            default: break
+            }
+        }
+    }
+    private func refreshStatusButton(paused: Bool? = nil) {
+        let paused = paused ?? model?.paused ?? false
+        status?.button?.title = updates?.hasUpdate == true ? "↑" : ""
+        status?.button?.image = NSImage(systemSymbolName: paused ? "pause.circle" : "square.grid.3x3", accessibilityDescription: "AeroGrid")
+        status?.button?.toolTip = updates?.hasUpdate == true ? "AeroGrid · Hay una actualización disponible" : (paused ? "AeroGrid · En pausa" : "AeroGrid · Tus espacios")
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === actionsMenu { status?.menu = nil; actionsMenu = nil }
+    }
+    @objc func updatePrimary() { if updates?.canInstall == true { updates?.install() } else { updates?.check() } }
+    @objc func checkUpdates() { updates?.check() }
+    @objc func cancelUpdate() { updates?.cancel() }
+    @objc func updateDetails() { updates?.showDetails() }
+    @objc func toggleAutomaticUpdates() {
+        updates?.automatic.toggle(); refreshActionsMenu()
+        if updates?.automatic == true { updates?.check() }
     }
     @objc func openOverview() {
         guard let model, !model.paused, !model.pauseChanging, overview?.isVisible != true else { return }
@@ -132,6 +207,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateLater }
+        updates?.stop()
         guard let model else { return .terminateNow }
         quitting = true
         model.prepareToQuit { sender.reply(toApplicationShouldTerminate:true) }
@@ -142,14 +218,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         window.title = title; window.contentView = NSHostingView(rootView: view); window.isReleasedWhenClosed = false; window.center()
         return window
     }
-    func applicationWillTerminate(_ notification: Notification) { accessTimer?.invalidate(); model?.stop() }
+    func applicationWillTerminate(_ notification: Notification) { updates?.stop(); accessTimer?.invalidate(); model?.stop() }
 }
 
 @main
 struct AeroGridMain {
-    static func main() {
+    @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: "local.AeroGrid").filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if args.first == "--verify-status-menu", args.count == 2 {
+            do { try ApplicationDelegate.verifyStatusMenu(output: URL(fileURLWithPath: args[1])) }
+            catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
         if args.first == "--verify-dynamic-fixtures", args.count == 2 || (args.count == 3 && args[2] == "--normal-only") {
             do { try DynamicVerification.run(output: URL(fileURLWithPath: args[1]),nativeChecks:args.count == 2) }
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
@@ -256,4 +337,53 @@ final class OrganizerPanel: NSPanel {
     override var canBecomeMain: Bool { false }
     var onCancel: (() -> Void)?
     override func cancelOperation(_ sender: Any?) { onCancel?() }
+}
+
+extension ApplicationDelegate {
+    /// Uses its own status item and temporary preferences, without starting a
+    /// model, touching Accessibility, or stopping the installed AeroGrid.
+    static func verifyStatusMenu(output: URL) throws {
+        let app = NSApplication.shared; app.setActivationPolicy(.accessory); app.finishLaunching()
+        let delegate = ApplicationDelegate()
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        delegate.status = item
+        item.button?.image = NSImage(systemSymbolName: "square.grid.3x3", accessibilityDescription: "AeroGrid menu verification")
+        item.button?.target = delegate; item.button?.action = #selector(statusClicked)
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        let suite = "AeroGrid.MenuVerification.\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set(try JSONEncoder().encode(UpdateCandidate(revision: String(repeating: "b", count: 40), title: "Fixture update")), forKey: "updates.candidate")
+        delegate.updates = AppUpdates(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), revision: String(repeating: "a", count: 40), preferences: preferences)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        var visibleFrames: [NSRect] = []
+        var nativeMenuAttached = false
+        let timer = Timer(timeInterval: 0.3, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                nativeMenuAttached = delegate.status?.menu != nil
+                visibleFrames = app.windows.filter { $0.isVisible && $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue }.map(\.frame)
+                delegate.status?.menu?.cancelTracking()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        delegate.showActionsMenu()
+        timer.invalidate()
+        let menu = delegate.makeActionsMenu()
+        let report: [String: Any] = [
+            "nativeStatusMenuAttached": nativeMenuAttached,
+            "menuDetachedOnClose": item.menu == nil,
+            "updateActionAvailable": menu.items.contains { $0.title == "Actualizar AeroGrid…" && $0.isEnabled },
+            "menuWindowObserved": !visibleFrames.isEmpty,
+            "menuWindowFrames": visibleFrames.map(NSStringFromRect),
+            "screenFrames": NSScreen.screens.map { NSStringFromRect($0.frame) },
+            "menuSize": NSStringFromSize(menu.size),
+            "menuFitsVertically": !visibleFrames.isEmpty && visibleFrames.allSatisfy { frame in NSScreen.screens.contains { frame.minY >= $0.frame.minY && frame.maxY <= $0.frame.maxY + 2 } },
+            "allRowsVisibleWithoutHover": visibleFrames.contains { $0.height >= menu.size.height },
+            "writesUserState": false
+        ]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output, options: .atomic)
+        guard nativeMenuAttached, item.menu == nil,
+              report["allRowsVisibleWithoutHover"] as? Bool == true,
+              report["menuFitsVertically"] as? Bool == true else { throw UpdateError.message("Native status menu placement or lifecycle failed") }
+    }
 }

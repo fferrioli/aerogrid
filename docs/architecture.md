@@ -45,6 +45,14 @@ Installed app bundles live in `~/Applications`. User configuration, map state, b
 
 The installer preserves existing AeroSpace configuration and rules; a clean installation gets a minimal configuration. Uninstall removes owned additions while retaining backups and user state. Raw state and diagnostics can identify local windows or apps and should be reviewed before sharing.
 
+## Updates
+
+The installed frontend carries a source revision, build metadata, Python interpreter path, and an update worker. Automatic checks use GitHub's public [commit and comparison API](https://docs.github.com/en/rest/commits/commits) for `fferrioli/aerogrid/main`; only an ahead revision is offered. No local configuration, window inventory, or logs are sent. Checks may be disabled independently of manual installation.
+
+An explicit update action starts the worker in a private support subdirectory. It downloads the selected full commit archive over HTTPS, validates paths, bounds expansion, and checks all resolved symlinks remain in the source tree. Compilation uses that isolated source and the local toolchain, preserving existing checkouts. The worker validates the new build against current configuration before requesting shutdown. The frontend writes a handoff marker and follows normal serialized shutdown; both installed components must exit before the existing transactional installer can replace them. The installer revalidates current configuration, backs up bundles/configuration, and rolls back failed commits. The worker also preserves exact state/control/configuration bytes before installation.
+
+Cancellation terminates only the worker's own build process group. Failed preparation keeps the current app running; a failed installation reopens the preserved app. Persistent status exposes errors/retry after relaunch, and a dead worker cannot leave the menu permanently busy. Local logs/backups remain private. Update preparation never changes macOS security policy; locally rebuilt ad-hoc signatures may require renewed Accessibility grants.
+
 ## Platform boundaries
 
 Accessibility approval is required for both apps. Optional private macOS APIs are used for touch/native Space integration and can change between OS versions. Missing capabilities return bounded errors rather than silently disabling system protections. AeroGrid does not install a scripting addition or require changing SIP.

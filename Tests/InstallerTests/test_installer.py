@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import plistlib
 import tempfile
 import types
 import unittest
@@ -17,6 +18,24 @@ def module(name):
 
 
 class InstallerTests(unittest.TestCase):
+    def testInstalledFrontendIncludesUpdaterAndExactBuildIdentity(self):
+        installer = module("install")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            installer.ROOT = root
+            (root / ".build").mkdir()
+            metadata = dict(revision="a" * 40, dirty=False, builtAt="2026-10-28T00:00:00+00:00", updateProtocol=1)
+            (root / ".build/build-info.json").write_text(json.dumps(metadata))
+            binary = root / "binary"; binary.write_bytes(b"fixture binary")
+            worker = ROOT / "scripts/update-worker.py"
+            with patch.object(installer, "run"):
+                app = installer.bundle(root / "stage", "AeroGrid", "AeroGrid", "local.AeroGrid", binary, [worker])
+            info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+            self.assertEqual(info["AeroGridRevision"], metadata["revision"])
+            self.assertEqual(info["AeroGridSourceDirty"], False)
+            self.assertTrue(pathlib.Path(info["AeroGridPythonPath"]).is_absolute())
+            self.assertEqual((app / "Contents/Resources/update-worker.py").read_bytes(), worker.read_bytes())
+
     def testCleanMacNeedsNoExistingAeroSpaceAndKeepsSeedBackupAcrossUpdates(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)

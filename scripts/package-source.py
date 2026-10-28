@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create a source snapshot without binaries, caches or user runtime data."""
 import hashlib
+import importlib.util
 import json
 import pathlib
 import zipfile
@@ -28,9 +29,15 @@ def main():
                 files.append(path)
     hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
               for path in sorted(files)}
+    spec = importlib.util.spec_from_file_location("aerogrid_build_info", ROOT / "scripts/build-info.py")
+    metadata = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(metadata)
+    version = json.dumps(metadata.build_info(), indent=2) + "\n"
+    hashes["source-version.json"] = hashlib.sha256(version.encode()).hexdigest()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(files):
             archive.write(path, pathlib.Path("AeroGrid-Source") / path.relative_to(ROOT))
+        archive.writestr("AeroGrid-Source/source-version.json", version)
         archive.writestr("AeroGrid-Source/source-manifest.json", json.dumps(hashes, indent=2) + "\n")
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".zip.sha256").write_text(f"{digest}  {output.name}\n")

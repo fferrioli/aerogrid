@@ -35,6 +35,7 @@ AeroGrid is a native macOS menu bar app built around a bundled, modified [AeroSp
 | 🖥️ **Work across displays** | Navigate only the display under your pointer or move all displays together. Each connected display has its own board. |
 | 🔌 **Unplug without losing your place** | Parallel app groups become neighboring spaces on the laptop. Existing stacks stay together. Reconnect to restore unchanged groups. |
 | 🔲 **Keep fullscreen reachable** | An app entering native fullscreen gets a neighboring destination when it was sharing a space with other apps. |
+| 🔄 **Update from the menu** | Get an update indicator, prepare the update in the background, and install with one click. |
 
 ## 🧑‍💻 A typical workflow
 
@@ -107,6 +108,12 @@ If an entry is missing, add its app from `~/Applications` with **+**. Then click
 AeroGrid uses one menu bar icon. Click it to organize; right-click for settings, recovery, pause/resume, and quit. Pause stops both gesture input and window management. Start at login is optional in settings.
 
 Local builds use ad-hoc signing and do not require a paid Apple Developer membership. There is currently no notarized release; managed Macs may restrict locally built apps too. See the [Spanish installation guide](BUILD-ON-ANOTHER-MAC.md) for a step-by-step walkthrough.
+
+## 🔄 Updates without Terminal
+
+Right-click the AeroGrid menu bar icon. **Buscar actualizaciones…** checks for a newer published revision; **Actualizar AeroGrid…** downloads its source, builds it locally while you keep working, then installs and reopens both components. A small **↑** beside the icon signals an available update. Automatic checks run after launch and every six hours, and can be disabled in the same menu. Installation always requires your click.
+
+Updates use the existing Swift and Python tools, preserve configuration and layouts, and keep backups. You can cancel during preparation; AeroGrid closes only once the build is ready. macOS can require renewed Accessibility approval for the rebuilt apps. An installation predating this updater needs one manual update to gain the menu. See [how updates work](docs/updates.es.md).
 
 ## 🔌 From ultrawide to laptop
 

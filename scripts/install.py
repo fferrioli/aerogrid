@@ -25,7 +25,7 @@ BACKUPS = SUPPORT / "backups" / STAMP
 
 
 def run(*args):
-    subprocess.run(args, check=True)
+    subprocess.run(args, check=True, timeout=60)
 
 
 def designated_requirement(path):
@@ -77,6 +77,16 @@ def bundle(directory, name, executable, identifier, source, resources):
                 CFBundlePackageType="APPL", CFBundleVersion="1", CFBundleShortVersionString="0.1",
                 LSUIElement=True, LSMinimumSystemVersion="14.0", NSHighResolutionCapable=True)
     if identifier == "local.AeroGrid":
+        metadata = ROOT / ".build/build-info.json"
+        if metadata.exists():
+            build = json.loads(metadata.read_text())
+            if build.get("revision") is not None and not re.fullmatch(r"[0-9a-f]{40}", build["revision"]):
+                raise ValueError("Invalid build revision; run scripts/build.sh again")
+            if build.get("revision"):
+                info["AeroGridRevision"] = build["revision"]
+            info["AeroGridSourceDirty"] = build.get("dirty", False)
+            info["AeroGridBuiltAt"] = build["builtAt"]
+        info["AeroGridPythonPath"] = sys.executable
         info["UTExportedTypeDeclarations"] = [dict(
             UTTypeIdentifier="local.AeroGrid.organization",
             UTTypeConformsTo=["public.data"],
@@ -198,7 +208,7 @@ def main():
         backend = bundle(directory, "AeroGrid Backend", "AeroSpace", "local.AeroGrid.Backend",
                          ROOT / "vendor/AeroSpace/.build/release/AeroSpaceApp",
                          [ROOT / "vendor/AeroSpace/docs/config-examples/default-config.toml", ROOT / "vendor/AeroSpace/.build/release/aerospace"])
-        app = bundle(directory, "AeroGrid", "AeroGrid", "local.AeroGrid", ROOT / ".build/release/AeroGrid", [])
+        app = bundle(directory, "AeroGrid", "AeroGrid", "local.AeroGrid", ROOT / ".build/release/AeroGrid", [ROOT / "scripts/update-worker.py"])
         current_requirements = {path.name: designated_requirement(path) for path in [backend, app]}
         ensure_apps_stopped()
         commit_install([backend, app], configuration, aerospace_path, updated, manifest, initial_config)
