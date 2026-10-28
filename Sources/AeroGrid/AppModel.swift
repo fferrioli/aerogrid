@@ -159,6 +159,7 @@ final class AppModel: ObservableObject {
             var error: Error?
             do { try work(self.engine) } catch let failure { error = failure }
             let observed = self.engine.observed, state = self.engine.state
+            let recoveryNotice = error == nil ? self.engine.consumeRecoveryNotice() : nil
             let hints = self.engine.navigationHints()
             DispatchQueue.main.async {
                 self.busy = false; self.state = state; self.desktop = observed; self.navigationHints = hints
@@ -169,8 +170,9 @@ final class AppModel: ObservableObject {
                     if feedback && !self.overviewVisible { self.showHUD(self.message) }
                     self.log(self.message)
                 } else {
-                    self.backendReady = true; if feedback { self.organizationError = nil }
-                    self.message = self.paused ? "AeroGrid en pausa" : "Activo · \(observed?.displays.count ?? 0) pantalla(s)"
+                    self.backendReady = true; if feedback || recoveryNotice != nil { self.organizationError = nil }
+                    self.message = recoveryNotice ?? (self.paused ? "AeroGrid en pausa" : "Activo · \(observed?.displays.count ?? 0) pantalla(s)")
+                    if let recoveryNotice { self.log(recoveryNotice) }
                 }
                 self.writeHealth()
                 completion?(error)

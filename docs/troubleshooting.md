@@ -36,6 +36,10 @@ Enable **Displays have separate Spaces** for independent native fullscreen navig
 
 On disconnect, normal gestures reach the adapted spaces without a modifier. Reconnection automatically reunites unchanged groups. If you reorganized a group while disconnected, that choice is preserved; **Reunir grupo** explicitly restores its grouping.
 
+## Adapted spaces overlap / «Los espacios adaptados se superponen»
+
+See the [Spanish recovery guide](recovery.es.md). A standalone Python tool can back up and repair the adapted map on an older installation, keep the window service running, and refresh saved observations from the live backend without rebuilding or changing permissions. The corrected app repairs conflicting adapted positions on load and refresh, and releases stale adapted positions when dormant spaces reappear.
+
 ## Update
 
 Quit AeroGrid from its menu, update this checkout, rebuild, and install:

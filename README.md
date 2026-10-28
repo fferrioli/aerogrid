@@ -140,6 +140,7 @@ Current limits:
 | Guide | Covers |
 |---|---|
 | [Install on another Mac — español](BUILD-ON-ANOTHER-MAC.md) | Toolchain setup, local builds, permissions, and updates |
+| [Recover a blocked map — español](docs/recovery.es.md) | Repair adapted-map conflicts on an existing installation, with backups |
 | [Troubleshooting](docs/troubleshooting.md) | Accessibility, backend recovery, gesture conflicts, and uninstall |
 | [Architecture](docs/architecture.md) | App, core model, window engine, and persisted state |
 | [Development and testing](CONTRIBUTING.md) | Test commands and safe local development |

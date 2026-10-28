@@ -162,6 +162,19 @@ public enum SpaceInsertion {
 }
 
 extension SpaceMap {
+    /// Keep valid adapted positions; rebuild only those that conflict. Window layouts and
+    /// the independent display boards are untouched. Projection places cleared entries.
+    @discardableResult public mutating func repairAdaptedGeometry() -> [String] {
+        var occupied: [SpaceRect] = [], repaired: [String] = []
+        for index in spaces.indices where !spaces[index].isDormant {
+            guard let frame = spaces[index].foldedRect else { continue }
+            if occupied.contains(where: { $0.overlaps(frame) }) {
+                spaces[index].foldedRect = nil
+                repaired.append(spaces[index].id)
+            } else { occupied.append(frame) }
+        }
+        return repaired
+    }
     /// Coordinates are local to a board. Combining displays is a projection, never a rewrite.
     public func projectedSpaces(combined: Bool) -> [Space] {
         guard combined else { return spaces }

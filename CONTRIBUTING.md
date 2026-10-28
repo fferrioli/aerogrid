@@ -11,6 +11,7 @@ zsh scripts/build.sh
 swift test
 (cd vendor/AeroSpace && swift test)
 python3 -m unittest discover -s Tests/InstallerTests -v
+python3 -m unittest discover -s Tests/RecoveryTests -v
 ```
 
 The backend source is vendored directly, including AeroGrid modifications. A normal clone needs no submodule initialization. `scripts/aerospace-grid.patch` records changes against the pinned AeroSpace revision in [UPSTREAM.md](UPSTREAM.md).

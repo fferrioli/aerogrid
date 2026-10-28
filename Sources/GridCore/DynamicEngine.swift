@@ -7,6 +7,7 @@ public final class DynamicEngine {
     public private(set) var observed: Desktop?
     public let backend: Backend
     private let store: Store?
+    private var recoveryNotice: String?
     private var reconcilingTopology = false
     public var map: SpaceMap { state.dynamicMap! }
     private var windows: [WindowInfo] { observed?.windows ?? [] }
@@ -26,6 +27,7 @@ public final class DynamicEngine {
             try persist()
         }
         try upgradeSpatialMap()
+        try repairAdaptedGeometryIfNeeded()
         try map.validate()
         observed = state.lastDesktop
     }
@@ -39,6 +41,34 @@ public final class DynamicEngine {
         try next.migrateSpatial(configuration: configuration, desktop: state.lastDesktop)
         state.dynamicMap = next
         try persist()
+    }
+    public func consumeRecoveryNotice() -> String? {
+        defer { recoveryNotice = nil }
+        return recoveryNotice
+    }
+    private func backupBeforeAdaptedRepair() throws {
+        guard let store else { return }
+        let name = "backups/spatial-repair-\(UUID().uuidString)"
+        let directory = store.directory.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let stored = store.directory.appendingPathComponent("state.json")
+        if FileManager.default.fileExists(atPath: stored.path) {
+            try FileManager.default.copyItem(at: stored, to: directory.appendingPathComponent("state.json"))
+        }
+        try store.save(state, name: "\(name)/memory-state.json")
+    }
+    private func repairAdaptedGeometryIfNeeded() throws {
+        var next = map
+        let repaired = next.repairAdaptedGeometry()
+        guard !repaired.isEmpty else { return }
+        // Geometry recovery must not mask another invalid identity or relationship.
+        try next.validate()
+        try backupBeforeAdaptedRepair()
+        let previous = state
+        state.dynamicMap = next
+        do { try persist() }
+        catch { state = previous; throw error }
+        recoveryNotice = "Mapa reparado: \(repaired.count) posición(es) adaptada(s). Se conservaron tus ventanas y distribuciones."
     }
     private func editMap(_ body: (inout SpaceMap) throws -> Void) rethrows {
         var next = map; try body(&next); state.dynamicMap = next
@@ -84,6 +114,7 @@ public final class DynamicEngine {
                 var next = map
                 if !next.fits(space.rect, board: space.board, excluding: [space.id]) { next.spaces[index].rect = next.frontier(near: space) }
                 next.spaces[index].dormant = false
+                next.spaces[index].foldedRect = nil // A dormant slot no longer reserves its old adapted position.
                 state.dynamicMap = next
             }
         }
@@ -105,6 +136,7 @@ public final class DynamicEngine {
         }
     }
     public func refresh() throws {
+        try repairAdaptedGeometryIfNeeded()
         let before = observed
         let desktop = try backend.desktop()
         guard desktop.windows != nil else { throw GridError.unavailable("Update AeroGrid Backend to enable the dynamic map") }
@@ -585,6 +617,12 @@ public final class DynamicEngine {
                              homes: desktop.windowHomes?.filter { home in Set(normal.map(\.workspace)).contains(home.workspace) && desktop.windows?.contains(where: { $0.id == home.id && $0.pid == home.pid && $0.boot == home.boot }) == true } ?? [], layouts: layouts)
     }
     private func restore(_ checkpoint: MapCheckpoint, restoreWindows: Bool = true) throws {
+        var next = map
+        next.spaces = checkpoint.spaces; next.families = checkpoint.families; next.fullscreens = checkpoint.fullscreens
+        if restoreWindows { next.layouts = checkpoint.layouts }
+        let repaired = next.repairAdaptedGeometry()
+        try next.validate()
+        if !repaired.isEmpty { try backupBeforeAdaptedRepair() }
         let actual = try backend.desktop()
         let live = Set((actual.windows ?? []).map(\.identity))
         let homes = checkpoint.homes.filter { live.contains(WindowIdentity(id: $0.id, pid: $0.pid, boot: $0.boot)) }
@@ -594,7 +632,8 @@ public final class DynamicEngine {
                 try backend.restore(workspace: space.workspace, snapshot: json)
             }
         }
-        editMap { map in map.spaces = checkpoint.spaces; map.families = checkpoint.families; map.fullscreens = checkpoint.fullscreens; if restoreWindows { map.layouts = checkpoint.layouts } }
+        state.dynamicMap = next
+        if !repaired.isEmpty { recoveryNotice = "Se repararon las posiciones adaptadas al recuperar la organización anterior." }
         sync(try backend.desktop())
     }
     private func organize(_ label: String, _ work: () throws -> Void) throws {
