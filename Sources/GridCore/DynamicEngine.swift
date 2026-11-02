@@ -135,6 +135,11 @@ public final class DynamicEngine {
         // Inactive boards need the same accurate diagrams as the visible destination.
         for space in map.spaces where space.nativeWindow == nil && !contents(of:space).isEmpty && (spaceIDs?.contains(space.id) ?? true) {
             let json = try backend.snapshot(workspace:space.workspace)
+            if let previous = map.layouts[space.id] {
+                if previous == json { continue }
+                if let before = try? LayoutSnapshot(json: previous),
+                   let current = try? LayoutSnapshot(json: json), before == current { continue }
+            }
             editMap { $0.layouts[space.id] = json }
         }
     }

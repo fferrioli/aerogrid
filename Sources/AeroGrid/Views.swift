@@ -4,18 +4,29 @@ import GridCore
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var draft: Configuration
-    @State private var selectedGrid = 0
+    private enum Page: String, CaseIterable {
+        case setup = "Setup"
+        case spaces = "Grids & layouts"
+        case gestures = "Gestures"
+        case advanced = "Import & diagnostics"
+    }
+    @State private var page: Page = .setup
     @State private var json = ""
     @State private var localError = ""
     init(model: AppModel) { self.model = model; _draft = State(initialValue: model.configuration) }
     var body: some View {
         VStack(spacing: 12) {
-            TabView {
-                setup.tabItem { Text("Setup") }
-                grids.tabItem { Text("Grids & layouts") }
-                gestures.tabItem { Text("Gestures") }
-                advanced.tabItem { Text("Import & diagnostics") }
-            }
+            Picker("Settings section", selection: $page) {
+                ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden()
+            Group {
+                switch page {
+                case .setup: setup
+                case .spaces: grids
+                case .gestures: gestures
+                case .advanced: advanced
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack {
                 Text(localError.isEmpty ? model.message : localError).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 Spacer()
@@ -96,6 +107,8 @@ struct SettingsView: View {
                 Button("Import configuration") { model.importConfig() }
                 Button("Open local files") { NSWorkspace.shared.open(model.directory) }
             }
+            Toggle("Record detailed gesture packets", isOn: $model.recordingGesturePackets)
+            Text("Enable only while reproducing a gesture problem. Turns off when AeroGrid restarts.").font(.caption).foregroundStyle(.secondary)
             TextField("AeroSpace CLI", text: $draft.backendPath)
             Text("Advanced input configuration. Organize the dynamic map from the organizer; legacy grid definitions are preserved for recovery.").font(.caption)
             HStack {

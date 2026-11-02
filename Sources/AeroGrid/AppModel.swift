@@ -16,6 +16,12 @@ final class AppModel: ObservableObject {
     private var backendLaunchPolicy = BackendLaunchPolicy()
     private var shuttingDown = false
     @Published var testingGestures = false { didSet { if testingGestures { input.reset() } } }
+    @Published var recordingGesturePackets = false {
+        didSet {
+            input.onPacket = nil
+            if recordingGesturePackets { input.onPacket = { [weak self] in self?.gesturePackets.json($0) } }
+        }
+    }
     @Published var inputReady = false
     @Published var backendReady = false
     @Published var moveMode = false
@@ -30,6 +36,7 @@ final class AppModel: ObservableObject {
     private let queue = DispatchQueue(label: "AeroGrid.engine", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
     private var busy = false
+    var hasPendingWork: Bool { busy || !pendingOperations.isEmpty }
     private var pendingOperations: [(feedback: Bool, control: Bool, completion: ((Error?) -> Void)?, work: (DynamicEngine) throws -> Void)] = []
     private var notifications: [NSObjectProtocol] = []
     private var hud: NSPanel?
@@ -76,7 +83,6 @@ final class AppModel: ObservableObject {
         }
         input.onDiagnostic = { [weak self] in self?.gestureMessage = $0 }
         input.onTrace = { [weak self] in self?.log($0) }
-        input.onPacket = { [weak self] in self?.gesturePackets.json($0) }
         input.onSwipe = { [weak self] swipe in self?.handle(swipe) }
         input.onContact = { [weak self] event in self?.handleContact(event) }
     }
@@ -162,16 +168,22 @@ final class AppModel: ObservableObject {
             let recoveryNotice = error == nil ? self.engine.consumeRecoveryNotice() : nil
             let hints = self.engine.navigationHints()
             DispatchQueue.main.async {
-                self.busy = false; self.state = state; self.desktop = observed; self.navigationHints = hints
+                self.busy = false
+                if self.state != state { self.state = state }
+                if self.desktop != observed { self.desktop = observed }
+                if self.navigationHints != hints { self.navigationHints = hints }
                 if let selection = self.gestureSelection, let map = state.dynamicMap, let observed,
                    (try? selection.validate(map:map,configuration:self.configuration,desktop:observed)) == nil { self.handleContact(.cancelled) }
                 if let error {
-                    self.message = error.localizedDescription; self.organizationError = self.message
+                    if self.message != error.localizedDescription { self.message = error.localizedDescription }
+                    if self.organizationError != self.message { self.organizationError = self.message }
                     if feedback && !self.overviewVisible { self.showHUD(self.message) }
                     self.log(self.message)
                 } else {
-                    self.backendReady = true; if feedback || recoveryNotice != nil { self.organizationError = nil }
-                    self.message = recoveryNotice ?? (self.paused ? "AeroGrid en pausa" : "Activo · \(observed?.displays.count ?? 0) pantalla(s)")
+                    if !self.backendReady { self.backendReady = true }
+                    if (feedback || recoveryNotice != nil) && self.organizationError != nil { self.organizationError = nil }
+                    let message = recoveryNotice ?? (self.paused ? "AeroGrid en pausa" : "Activo · \(observed?.displays.count ?? 0) pantalla(s)")
+                    if self.message != message { self.message = message }
                     if let recoveryNotice { self.log(recoveryNotice) }
                 }
                 self.writeHealth()
@@ -189,17 +201,21 @@ final class AppModel: ObservableObject {
     }
     func refresh() {
         guard !shuttingDown, !pauseChanging, Date() >= topologySettlesAt else { return }
+        if isPreview {
+            perform(feedback:false,coalesce:true) { try $0.refresh() }
+            return
+        }
         launchBackend()
         if paused {
             if input.running { input.stop() }
-            inputReady = false
+            if inputReady { inputReady = false }
         } else if !AXIsProcessTrusted() {
-            input.stop()
-            inputReady = false
+            if inputReady || input.running { input.stop() }
+            if inputReady { inputReady = false }
         } else if !input.running {
             inputReady = input.start()
         } else {
-            inputReady = true
+            if !inputReady { inputReady = true }
         }
         guard gestureSelection == nil, !organizingDrag, !editingOrganization, !organizationMenuOpen else { return }
         let desiredPause = paused, syncManagement = managementNeedsSync || paused
@@ -209,7 +225,10 @@ final class AppModel: ObservableObject {
                 if !desiredPause { try engine.refresh() }
                 DispatchQueue.main.async { self.managementNeedsSync = false }
             } catch {
-                DispatchQueue.main.async { self.backendReady = false; self.managementNeedsSync = true }
+                DispatchQueue.main.async {
+                    if self.backendReady { self.backendReady = false }
+                    self.managementNeedsSync = true
+                }
                 throw error
             }
         }
@@ -368,7 +387,8 @@ final class AppModel: ObservableObject {
         switch event {
         case .cancelled:
             log("Contact cancelled: pending=\(gestureSelection != nil)")
-            gestureSelection = nil; gestureScope = nil; closeNavigationHUD()
+            if gestureSelection != nil { gestureSelection = nil }
+            gestureScope = nil; closeNavigationHUD()
         case .ended:
             log("Contact ended: pending=\(gestureSelection != nil)")
             guard let selection = gestureSelection else { return }

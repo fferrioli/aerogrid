@@ -231,7 +231,7 @@ public struct SpaceMap: Codable, Equatable {
     }
 }
 
-public struct NavigationHint {
+public struct NavigationHint: Equatable {
     public var name: String
     public var row: Int
     public var column: Int

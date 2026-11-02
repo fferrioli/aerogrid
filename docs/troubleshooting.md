@@ -30,6 +30,12 @@ A quick gesture selects one neighbor. To explore farther, keep contact briefly a
 
 Avoid enabling another gesture provider for the same bindings at the same time. A new two-finger scroll should remain usable; report accidental source scrolling separately from navigation failures.
 
+## High CPU while idle
+
+Update AeroGrid from its menu. The frontend avoids redundant UI publications, releases closed settings/organizer views, and runs gesture-release checks only while needed. Detailed packet logging is off by default; enable **Record detailed gesture packets** under **Settings → Import & diagnostics** only while reproducing a gesture problem. It turns off on restart. Ordinary diagnostic messages remain available.
+
+If CPU remains high after updating, distinguish **AeroGrid** from **AeroGrid Backend** in Activity Monitor, note whether the organizer/settings are visible, and capture a short **Sample Process** report. Samples can contain local paths; review them before sharing. An isolated UI benchmark is available as `AeroGrid --benchmark-idle REPORT.json`; it uses fake windows/backend and does not measure your physical desktop or start gesture input.
+
 ## Fullscreen windows or external displays behave unexpectedly
 
 Enable **Displays have separate Spaces** for independent native fullscreen navigation. A native fullscreen Space that has never been visited may need one visit before macOS exposes its window.

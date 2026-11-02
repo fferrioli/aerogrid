@@ -21,6 +21,8 @@ Root tests exercise the core model, layout/navigation behavior, organization tra
 
 Recorded gesture fixtures use aliased contact identifiers and contain no window content. Replay is useful regression evidence; it does not prove physical gesture behavior.
 
+For frontend CPU changes, `AeroGrid --benchmark-idle REPORT.json` measures process CPU and model publications with visible settings, hidden settings, and no UI. It uses 12 fictional windows, a fake backend, and a deliberately frequent 0.5-second poll. Do not equate these short synthetic measurements with a long-running user's Activity Monitor reading. Unchanged polls must produce no UI publications; real focus/layout changes and corroborated release settlement must still propagate.
+
 ## Validate behavior on hardware
 
 For gesture changes, check quick flicks, consecutive flicks, held exploration, reversals, two-finger scrolling, and release/momentum isolation. For layout changes, check moving an app to occupied/empty/new spaces, splitting, stacking, whole-space insertion, resizing, and Undo. For topology changes, check physical disconnect/reconnect and native fullscreen on each display.

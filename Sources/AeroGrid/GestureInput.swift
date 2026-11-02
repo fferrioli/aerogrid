@@ -24,6 +24,7 @@ final class GestureInput {
     private var sequence = 0
     private var nextAlias = 0
     init(configuration: Configuration) { self.configuration = configuration }
+    var hasSettlementTimer: Bool { settlementTimer != nil }
     var running: Bool {
         guard let tap else { return false }
         return CFMachPortIsValid(tap) && CGEvent.tapIsEnabled(tap: tap)
@@ -40,10 +41,6 @@ final class GestureInput {
         source = CFMachPortCreateRunLoopSource(nil, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        let timer = DispatchSource.makeTimerSource(queue:.main)
-        timer.schedule(deadline:.now()+0.02,repeating:0.02)
-        timer.setEventHandler { [weak self] in self?.settleRelease() }
-        timer.resume(); settlementTimer = timer
         onDiagnostic?("Gesture input ready · swipe to inspect recognition")
         return true
     }
@@ -54,6 +51,7 @@ final class GestureInput {
         tap = nil; source = nil; reset()
     }
     func reset() {
+        settlementTimer?.cancel(); settlementTimer = nil
         generation += 1; contact.reset(); scrollGuard.reset(); reportedSwipe = false; lastContactSummary = ""; onContact?(.cancelled)
     }
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -89,28 +87,29 @@ final class GestureInput {
         let flags = nsEvent.modifierFlags
         let modifiers = (flags.contains(.shift) ? 1 : 0) | (flags.contains(.control) ? 2 : 0) | (flags.contains(.option) ? 4 : 0) | (flags.contains(.command) ? 8 : 0)
         let displayID = target?()
-        let events = contact.feed(contacts,ended:contacts.isEmpty && nsEvent.phase.contains(.ended),modifiers:modifiers,displayID:displayID,
-            threshold:configuration.threshold,invert:configuration.invert,timestamp:nsEvent.timestamp)
+        let events = recognizeContacts(contacts,ended:contacts.isEmpty && nsEvent.phase.contains(.ended),modifiers:modifiers,displayID:displayID,timestamp:nsEvent.timestamp)
         scrollGuard.observe(contact.scrollContext,events:events,bindings:configuration.bindings,enabled:suppressScroll,timestamp:nsEvent.timestamp)
-        // Preserve complete packet evidence for replay, including empty/foreign-phase packets
-        // that must never control a contact cohort. No window content or raw touch IDs is stored.
-        sequence += 1
-        let samples:[[String:Any]] = contacts.map { touch in
-            if aliases[touch.sample.id] == nil { nextAlias += 1; aliases[touch.sample.id] = nextAlias }
-            return ["id":aliases[touch.sample.id]!,"x":touch.sample.x,"y":touch.sample.y,
-                "phase":String(describing:touch.phase),"resting":touch.resting]
+        // Full packet construction/serialization is opt-in. Recognition still sees
+        // every packet, including partial lifts and foreign native phases.
+        if let onPacket {
+            sequence += 1
+            let samples:[[String:Any]] = contacts.map { touch in
+                if aliases[touch.sample.id] == nil { nextAlias += 1; aliases[touch.sample.id] = nextAlias }
+                return ["id":aliases[touch.sample.id]!,"x":touch.sample.x,"y":touch.sample.y,
+                    "phase":String(describing:touch.phase),"resting":touch.resting]
+            }
+            let decisions = events.map { event -> String in
+                switch event { case .step(let swipe):return "step:\(swipe.fingers):\(swipe.direction.rawValue)";case .ended:return "ended";case .cancelled:return "cancelled" }
+            }
+            var packet:[String:Any] = ["seq":sequence,"timestamp":nsEvent.timestamp,"cgType":type.rawValue,
+                "type":nsEvent.type.rawValue,"subtype":nsEvent.subtype.rawValue,"phase":nsEvent.phase.rawValue,
+                "momentumPhase":nsEvent.momentumPhase.rawValue,"touches":samples,"events":decisions,
+                "modifiers":modifiers,"invert":configuration.invert,"threshold":configuration.threshold,"generation":self.generation]
+            if let reason = contact.cancellationReason { packet["cancellation"] = reason }
+            if let reason = contact.decisionReason { packet["decision"] = reason }
+            onPacket(packet)
+            if aliases.count > 256 && contacts.allSatisfy({ $0.phase == .ended || $0.phase == .cancelled }) { aliases.removeAll() }
         }
-        let decisions = events.map { event -> String in
-            switch event { case .step(let swipe):return "step:\(swipe.fingers):\(swipe.direction.rawValue)";case .ended:return "ended";case .cancelled:return "cancelled" }
-        }
-        var packet:[String:Any] = ["seq":sequence,"timestamp":nsEvent.timestamp,"cgType":type.rawValue,
-            "type":nsEvent.type.rawValue,"subtype":nsEvent.subtype.rawValue,"phase":nsEvent.phase.rawValue,
-            "momentumPhase":nsEvent.momentumPhase.rawValue,"touches":samples,"events":decisions,
-            "modifiers":modifiers,"invert":configuration.invert,"threshold":configuration.threshold,"generation":self.generation]
-        if let reason = contact.cancellationReason { packet["cancellation"] = reason }
-        if let reason = contact.decisionReason { packet["decision"] = reason }
-        onPacket?(packet)
-        if aliases.count > 256 && contacts.allSatisfy({ $0.phase == .ended || $0.phase == .cancelled }) { aliases.removeAll() }
         let generation = self.generation
         let moving = contacts.filter { !$0.resting && $0.phase != .ended && $0.phase != .cancelled }.count
         let resting = contacts.filter(\.resting).count
@@ -129,17 +128,36 @@ final class GestureInput {
         // contact cohort are consumed. Native Mission Control conflicts remain explicit settings.
         return Unmanaged.passUnretained(event)
     }
+    func recognizeContacts(_ contacts: [TouchContact], ended: Bool = false, modifiers: Int = 0, displayID: String?, timestamp: TimeInterval) -> [ContactGestureEvent] {
+        let events = contact.feed(contacts, ended: ended, modifiers: modifiers, displayID: displayID,
+            threshold: configuration.threshold, invert: configuration.invert, timestamp: timestamp)
+        updateSettlementTimer()
+        return events
+    }
+    private func updateSettlementTimer() {
+        guard contact.needsSettlement else { settlementTimer?.cancel(); settlementTimer = nil; return }
+        guard settlementTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.02, repeating: 0.02)
+        timer.setEventHandler { [weak self] in self?.settleRelease() }
+        settlementTimer = timer; timer.resume()
+    }
     private func settleRelease() {
-        guard contact.needsSettlement else { return }
+        guard contact.needsSettlement else { updateSettlementTimer(); return }
         let timestamp = ProcessInfo.processInfo.systemUptime
         let events = contact.advance(timestamp:timestamp)
-        sequence += 1
-        var packet:[String:Any] = ["seq":sequence,"timestamp":timestamp,"kind":"settlement","touches":[],
-            "generation":generation,"invert":configuration.invert,"threshold":configuration.threshold]
-        if let reason = contact.decisionReason { packet["decision"] = reason; onTrace?("Input settlement: \(reason)") }
+        updateSettlementTimer()
+        if let reason = contact.decisionReason { onTrace?("Input settlement: \(reason)") }
         scrollGuard.observe(contact.scrollContext,events:events,bindings:configuration.bindings,
             enabled:shouldSuppressScroll?() ?? false,timestamp:timestamp)
-        onPacket?(packet); deliver(events)
+        if let onPacket {
+            sequence += 1
+            var packet:[String:Any] = ["seq":sequence,"timestamp":timestamp,"kind":"settlement","touches":[],
+                "generation":generation,"invert":configuration.invert,"threshold":configuration.threshold]
+            if let reason = contact.decisionReason { packet["decision"] = reason }
+            onPacket(packet)
+        }
+        deliver(events)
     }
     private func deliver(_ events:[ContactGestureEvent]) {
         let generation = self.generation

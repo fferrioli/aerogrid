@@ -15,6 +15,8 @@ AeroGrid separates spatial organization from the window engine. The native menu 
 
 The input layer recognizes configured contact cohorts and freezes the display target at gesture start. A reported recontact remains provisional until a later contact frame confirms it alongside the fingers that stayed down. Repeated native landing snapshots cannot erase an earlier lift. A quick flick chooses one neighbor. Continued deliberate movement after the hold threshold explores additional candidates. Selection is previewed during contact; only the final target is committed at release.
 
+Release-settlement checks run only while an explicitly lifted cohort needs corroboration; idle and held contacts have no repeating release timer. Full packet construction/logging is opt-in for troubleshooting. Recognition still receives all contact frames, and release timing/thresholds are unchanged.
+
 For a stable desktop, committing a gesture captures only the departing and arriving layouts. A fresh window inventory validates membership and display ownership before switching; topology changes, backend restarts, fullscreen changes, and pending recovery use complete reconciliation. The coordinated-target preflight, post-switch visibility checks, and rollback remain active. Command completion uses process-exit notification rather than a polling sleep. Local navigation timings distinguish queue time from execution time.
 
 Navigation uses space rectangles and remembered entry positions. It skips geometric holes, retains deliberately created empty destinations, and excludes a destination already visible on another display. Each display keeps an independent cursor. Coordinated moves stop at blocked edges rather than wrapping.
@@ -26,6 +28,8 @@ Stable space identifiers are independent of display labels and backend workspace
 Automatic discoveries and generated fullscreen/split destinations use a nearby free edge of their source. Distant columns and dormant import slots do not push additions to the far side of the board. Combining boards preserves explicit adapted positions and places generated children relative to their adapted source. Existing coordinates and deliberate gaps are not globally compacted.
 
 Organization changes are serialized and validate window ownership using process and boot identity. A pending transaction records rollback state so interrupted changes can recover before accepting new work. Undo checks for later incompatible edits and does not recreate closed windows.
+
+Background refresh publishes desktop, map, hints and readiness only when their values change. Semantically identical layout snapshots keep their existing bytes, avoiding invalidations caused solely by JSON key order. Closed settings/organizer windows release their hosting views; settings construct only the active section rather than retaining all tabs in a native toolbar-backed TabView.
 
 On disconnect, parallel layout groups become neighboring destinations; stacked subtrees remain intact. Family records preserve the original nested arrangement and proportions. Reconnection can recompose unchanged families without overwriting arrangements the user edited.
 

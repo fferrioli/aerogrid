@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 import GridCore
 
-@MainActor final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+@MainActor final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     var model: AppModel?
     private var overview: NSWindow?
     private var overviewScreen: NSScreen?
@@ -167,7 +167,8 @@ import GridCore
         if overview.frame != frame { overview.setFrame(frame,display:true) }
     }
     func closeOverview(restoreFocus: Bool) {
-        overview?.orderOut(nil); model?.overviewVisible = false; model?.endDrag(); model?.editingOrganization = false; departedAt = nil; lastOpened = Date()
+        overview?.orderOut(nil); overview?.contentView = nil
+        model?.overviewVisible = false; model?.endDrag(); model?.editingOrganization = false; departedAt = nil; lastOpened = Date()
         if restoreFocus { model?.restoreOverviewFocus() }
     }
     private func checkTopAccess() {
@@ -199,8 +200,16 @@ import GridCore
     }
     @objc func openSettings() {
         guard let model else { return }
-        if settings == nil { settings = makeWindow(title: "AeroGrid Settings", view: SettingsView(model: model)) }
+        if settings == nil {
+            settings = makeWindow(title: "AeroGrid Settings", view: SettingsView(model: model))
+            settings?.delegate = self
+        }
         NSApp.activate(ignoringOtherApps: true); settings?.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === settings else { return }
+        window.contentView = nil
+        settings = nil
     }
     @objc func togglePause() { if let model { model.setPaused(!model.paused) } }
     @objc func recover() { model?.recover() }
@@ -226,6 +235,11 @@ struct AeroGridMain {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: "local.AeroGrid").filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if args.first == "--benchmark-idle", args.count == 2 {
+            do { try IdlePerformanceVerification.run(output: URL(fileURLWithPath: args[1])) }
+            catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
         if args.first == "--verify-status-menu", args.count == 2 {
             do { try ApplicationDelegate.verifyStatusMenu(output: URL(fileURLWithPath: args[1])) }
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
