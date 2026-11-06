@@ -154,10 +154,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..c16e2d9
+index 0000000..3780670
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,492 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -190,7 +190,54 @@ index 0000000..c16e2d9
 +    var workspace: String
 +    var floating: Bool
 +}
++
++struct GridNativeRecoveryEvidence {
++    var boot: String
++    var owners: [UInt32: Int32]
++    var monitors: [UInt32: Int]
++
++    func validates(_ home: GridWindowHome) -> Bool {
++        home.boot == boot && owners[home.id] == home.pid && monitors[home.id] != nil
++    }
++}
++
++struct GridDeferredNativeWindow {
++    var home: GridWindowHome
++    var monitor: Int
++    var appName: String
++    var bundleID: String
++
++    var inventory: [String: Any] {
++        ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
++         "floating": home.floating, "monitor": monitor, "nativeMonitor": monitor,
++         "nativeFullscreen": true, "appName": appName, "bundleID": bundleID, "title": appName]
++    }
++    func matches(workspace: String, monitor: Int) -> Bool {
++        home.workspace == workspace && self.monitor == monitor
++    }
++}
 +@MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
++
++@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
++    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
++    guard !pending.isEmpty else { return [] }
++    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
++    var owners: [UInt32: Int32] = [:]
++    for entry in entries {
++        if let id = entry[kCGWindowNumber as String] as? NSNumber,
++           let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
++    }
++    var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
++    for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
++        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id)?.monitorId_oneBased
++    }
++    return pending.sorted { $0.id < $1.id }.compactMap { home in
++        guard evidence.validates(home), let monitor = evidence.monitors[home.id],
++              let app = NSRunningApplication(processIdentifier: home.pid), !app.isTerminated else { return nil }
++        return GridDeferredNativeWindow(home: home, monitor: monitor,
++            appName: app.localizedName ?? "Application", bundleID: app.bundleIdentifier ?? "")
++    }
++}
 +
 +struct GridMinimumWidthTracker {
 +    private struct Candidate {
@@ -335,6 +382,22 @@ index 0000000..c16e2d9
 +                let request = try JSONDecoder().decode(GridActivationTarget.self, from: data)
 +                guard let monitor = sortedMonitorInfos.first(where: { $0.monitorId_oneBased == request.monitor }) else { return .fail(io.err("Target display unavailable")) }
 +                if let forced = ws.forceAssignedMonitor, forced.monitorId_oneBased != request.monitor { return .fail(io.err("Workspace is force-assigned to another display")) }
++                if let id = request.window, Window.get(byId: id) == nil,
++                   let deferred = gridDeferredNativeWindows().first(where: { $0.home.id == id }),
++                   deferred.matches(workspace: ws.name, monitor: request.monitor) {
++                    if args.operation.val == "activate-target" {
++                        gridPendingWorkspaces.insert(ws.name)
++                        defer { gridPendingWorkspaces.remove(ws.name) }
++                        try await gridActivateUndiscoveredNativeWindow(id, monitor: monitor)
++                        if let app = NSRunningApplication(processIdentifier: deferred.home.pid),
++                           let macApp = try await MacApp.getOrRegister(app) {
++                            _ = try await macApp.getFocusedWindow(.nonCancellable)
++                            try await normalizeLayoutReason()
++                        }
++                        guard gridNativeWindowIsVisible(id) else { return .fail(io.err("Fullscreen destination did not become visible")) }
++                    }
++                    return .succ
++                }
 +                let window: Window?
 +                if let id = request.window {
 +                    guard let selected = ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive.first(where: { $0.windowId == id }) else { return .fail(io.err("Fullscreen window no longer exists in this space")) }
@@ -415,7 +478,8 @@ index 0000000..c16e2d9
 +                    "builtin": CGDisplayIsBuiltin(cg) != 0, "width": m.visibleRect.width, "height": m.visibleRect.height]
 +        }
 +        let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
-+        let nativeHomes = gridNativeWorkspaceMonitors()
++        var nativeHomes = gridNativeWorkspaceMonitors()
++        var nativeVisible = gridNativeVisibleWindows()
 +        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0)?.monitorId_oneBased }
 +            ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
 +        let boot = gridBootIdentity()
@@ -448,7 +512,12 @@ index 0000000..c16e2d9
 +                inventory.append(value)
 +            }
 +        }
-+        let value: [String: Any] = ["windows": inventory, "nativeVisible": gridNativeVisibleWindows(), "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
++        for deferred in gridDeferredNativeWindows() {
++            inventory.append(deferred.inventory)
++            nativeHomes[deferred.home.workspace] = deferred.monitor
++            if gridNativeWindowIsVisible(deferred.home.id) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
++        }
++        let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
 +                                  "focusedMonitor": focusedMonitor,
 +                                  "focusedWindow": focus.windowOrNil.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 2]
 +        return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
@@ -583,10 +652,10 @@ index 0000000..c16e2d9
 +}
 diff --git a/Sources/AppBundle/command/impl/GridNativeSpaces.swift b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
 new file mode 100644
-index 0000000..55b1eee
+index 0000000..c5b7f36
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,181 @@
 +import AppKit
 +import Common
 +import PrivateApi
@@ -626,8 +695,12 @@ index 0000000..55b1eee
 +    return String(decoding: try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]), as: UTF8.self)
 +}
 +@MainActor func gridNativeMonitor(_ window: Window) -> MonitorInfo? {
-+    guard window.parent is MacosFullscreenWindowsContainer, let displays = nativeDisplays() else { return nil }
-+    let spaces = AeroGridCopyWindowSpaces(window.windowId) as? [NSNumber] ?? []
++    guard window.parent is MacosFullscreenWindowsContainer else { return nil }
++    return gridNativeMonitor(windowID: window.windowId)
++}
++@MainActor func gridNativeMonitor(windowID: UInt32) -> MonitorInfo? {
++    guard let displays = nativeDisplays() else { return nil }
++    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
 +    guard let display = displays.first(where: { d in spaces.contains { value in d.spaces.contains { $0.id == value.uint64Value && $0.type == 4 } } }) else { return nil }
 +    return sortedMonitorInfos.first { monitor in
 +        let screen = NSScreen.screens[monitor.monitorAppKitNsScreenScreensId - 1]
@@ -635,6 +708,24 @@ index 0000000..55b1eee
 +        guard let uuid = CGDisplayCreateUUIDFromDisplayID(cg)?.takeRetainedValue() else { return false }
 +        return CFUUIDCreateString(nil, uuid) as String == display.id
 +    }
++}
++
++@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32) -> Bool {
++    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
++    return nativeDisplays()?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
++}
++
++@MainActor func gridActivateUndiscoveredNativeWindow(_ windowID: UInt32, monitor: MonitorInfo) async throws {
++    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
++    let ids = Set(spaces.map(\.uint64Value))
++    guard gridNativeMonitor(windowID: windowID)?.monitorId_oneBased == monitor.monitorId_oneBased,
++          let display = nativeDisplays()?.first(where: { display in
++              display.spaces.contains { ids.contains($0.id) && $0.type == 4 }
++          }),
++          let destination = display.spaces.first(where: { space in
++              space.type == 4 && ids.contains(space.id)
++          }) else { throw NSError(domain: "Fullscreen destination is no longer available", code: 1) }
++    try await gridNativeSwitch(display: display, destination: destination.id, monitor: monitor)
 +}
 +@MainActor func gridNativeWorkspaceMonitors() -> [String: Int] {
 +    var result: [String: Int] = [:]
@@ -1416,6 +1507,42 @@ index 0000000..ac1db6e
 +        }, inputCounters: { [] })
 +        try await updateFocusCache(fallback)
 +        XCTAssertTrue(focus.windowOrNil === chosen)
++    }
++}
+diff --git a/Sources/AppBundleTests/GridNativeRecoveryTest.swift b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
+new file mode 100644
+index 0000000..42a3544
+--- /dev/null
++++ b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
+@@ -0,0 +1,30 @@
++@testable import AppBundle
++import XCTest
++
++final class GridNativeRecoveryTest: XCTestCase {
++    func testDeferredWindowNeedsCurrentBootMatchingOwnerAndNativeDisplay() {
++        let home = GridWindowHome(id: 99, pid: 4, boot: "current", workspace: "editor", floating: false)
++        let valid = GridNativeRecoveryEvidence(boot: "current", owners: [99: 4], monitors: [99: 2])
++        XCTAssertTrue(valid.validates(home))
++        XCTAssertFalse(GridNativeRecoveryEvidence(boot: "other", owners: [99: 4], monitors: [99: 2]).validates(home))
++        XCTAssertFalse(GridNativeRecoveryEvidence(boot: "current", owners: [99: 5], monitors: [99: 2]).validates(home))
++        XCTAssertFalse(GridNativeRecoveryEvidence(boot: "current", owners: [:], monitors: [99: 2]).validates(home))
++        XCTAssertFalse(GridNativeRecoveryEvidence(boot: "current", owners: [99: 4], monitors: [:]).validates(home))
++    }
++    func testDeferredFullscreenInventoryKeepsItsHomeAndExactDisplay() throws {
++        let home = GridWindowHome(id: 99, pid: 4, boot: "current", workspace: "editor", floating: false)
++        let pending = GridDeferredNativeWindow(home: home, monitor: 2, appName: "Browser", bundleID: "test.browser")
++        // Exercise the wire payload used by the organizer before AX discovery.
++        let data = try JSONSerialization.data(withJSONObject: pending.inventory)
++        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
++        XCTAssertEqual(value["id"] as? Int, 99)
++        XCTAssertEqual(value["pid"] as? Int, 4)
++        XCTAssertEqual(value["workspace"] as? String, "editor")
++        XCTAssertEqual(value["nativeFullscreen"] as? Bool, true)
++        XCTAssertEqual(value["nativeMonitor"] as? Int, 2)
++        XCTAssertEqual(value["appName"] as? String, "Browser")
++        XCTAssertTrue(pending.matches(workspace: "editor", monitor: 2))
++        XCTAssertFalse(pending.matches(workspace: "other", monitor: 2))
++        XCTAssertFalse(pending.matches(workspace: "editor", monitor: 1))
 +    }
 +}
 diff --git a/Sources/AppBundleTests/command/GridLayoutCommandTest.swift b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift

@@ -11,6 +11,8 @@ Native Space discovery uses optional SkyLight read APIs (also documented in Hamm
 
 Remembered native-fullscreen layout trees reconcile their window membership with the current workspace on snapshot and exit. Original fullscreen slots and nested ratios are preserved while closed/moved windows are removed and newly opened groups remain discoverable.
 
+After backend restart, pending fullscreen homes are exposed only when the current boot, WindowServer owner PID, live app, and native display agree. They can be activated by their exact native Space before Accessibility enumerates the window; normal AX discovery then takes over. This avoids requiring a Dock activation to recover a background fullscreen app.
+
 The helper's existing socket/UI dependencies were not copied into the controller. AeroGrid uses a dependency-free Swift package for its own menu app, core model, and tests; the AeroSpace fork retains its pinned package dependencies.
 
 The fork uses the distinct `local.AeroGrid.Backend` bundle identity and socket namespace. It requests normal macOS Accessibility approval at startup and does not reset TCC permission entries.

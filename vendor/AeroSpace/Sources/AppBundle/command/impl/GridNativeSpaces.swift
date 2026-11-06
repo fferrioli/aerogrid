@@ -37,8 +37,12 @@ struct GridNativeDisplay {
     return String(decoding: try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]), as: UTF8.self)
 }
 @MainActor func gridNativeMonitor(_ window: Window) -> MonitorInfo? {
-    guard window.parent is MacosFullscreenWindowsContainer, let displays = nativeDisplays() else { return nil }
-    let spaces = AeroGridCopyWindowSpaces(window.windowId) as? [NSNumber] ?? []
+    guard window.parent is MacosFullscreenWindowsContainer else { return nil }
+    return gridNativeMonitor(windowID: window.windowId)
+}
+@MainActor func gridNativeMonitor(windowID: UInt32) -> MonitorInfo? {
+    guard let displays = nativeDisplays() else { return nil }
+    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
     guard let display = displays.first(where: { d in spaces.contains { value in d.spaces.contains { $0.id == value.uint64Value && $0.type == 4 } } }) else { return nil }
     return sortedMonitorInfos.first { monitor in
         let screen = NSScreen.screens[monitor.monitorAppKitNsScreenScreensId - 1]
@@ -46,6 +50,24 @@ struct GridNativeDisplay {
         guard let uuid = CGDisplayCreateUUIDFromDisplayID(cg)?.takeRetainedValue() else { return false }
         return CFUUIDCreateString(nil, uuid) as String == display.id
     }
+}
+
+@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32) -> Bool {
+    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
+    return nativeDisplays()?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
+}
+
+@MainActor func gridActivateUndiscoveredNativeWindow(_ windowID: UInt32, monitor: MonitorInfo) async throws {
+    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
+    let ids = Set(spaces.map(\.uint64Value))
+    guard gridNativeMonitor(windowID: windowID)?.monitorId_oneBased == monitor.monitorId_oneBased,
+          let display = nativeDisplays()?.first(where: { display in
+              display.spaces.contains { ids.contains($0.id) && $0.type == 4 }
+          }),
+          let destination = display.spaces.first(where: { space in
+              space.type == 4 && ids.contains(space.id)
+          }) else { throw NSError(domain: "Fullscreen destination is no longer available", code: 1) }
+    try await gridNativeSwitch(display: display, destination: destination.id, monitor: monitor)
 }
 @MainActor func gridNativeWorkspaceMonitors() -> [String: Int] {
     var result: [String: Int] = [:]

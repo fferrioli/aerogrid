@@ -30,7 +30,54 @@ struct GridWindowHome: Codable {
     var workspace: String
     var floating: Bool
 }
+
+struct GridNativeRecoveryEvidence {
+    var boot: String
+    var owners: [UInt32: Int32]
+    var monitors: [UInt32: Int]
+
+    func validates(_ home: GridWindowHome) -> Bool {
+        home.boot == boot && owners[home.id] == home.pid && monitors[home.id] != nil
+    }
+}
+
+struct GridDeferredNativeWindow {
+    var home: GridWindowHome
+    var monitor: Int
+    var appName: String
+    var bundleID: String
+
+    var inventory: [String: Any] {
+        ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
+         "floating": home.floating, "monitor": monitor, "nativeMonitor": monitor,
+         "nativeFullscreen": true, "appName": appName, "bundleID": bundleID, "title": appName]
+    }
+    func matches(workspace: String, monitor: Int) -> Bool {
+        home.workspace == workspace && self.monitor == monitor
+    }
+}
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
+
+@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
+    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
+    guard !pending.isEmpty else { return [] }
+    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+    var owners: [UInt32: Int32] = [:]
+    for entry in entries {
+        if let id = entry[kCGWindowNumber as String] as? NSNumber,
+           let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
+    }
+    var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
+    for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
+        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id)?.monitorId_oneBased
+    }
+    return pending.sorted { $0.id < $1.id }.compactMap { home in
+        guard evidence.validates(home), let monitor = evidence.monitors[home.id],
+              let app = NSRunningApplication(processIdentifier: home.pid), !app.isTerminated else { return nil }
+        return GridDeferredNativeWindow(home: home, monitor: monitor,
+            appName: app.localizedName ?? "Application", bundleID: app.bundleIdentifier ?? "")
+    }
+}
 
 struct GridMinimumWidthTracker {
     private struct Candidate {
@@ -175,6 +222,22 @@ struct GridLayoutCommand: Command {
                 let request = try JSONDecoder().decode(GridActivationTarget.self, from: data)
                 guard let monitor = sortedMonitorInfos.first(where: { $0.monitorId_oneBased == request.monitor }) else { return .fail(io.err("Target display unavailable")) }
                 if let forced = ws.forceAssignedMonitor, forced.monitorId_oneBased != request.monitor { return .fail(io.err("Workspace is force-assigned to another display")) }
+                if let id = request.window, Window.get(byId: id) == nil,
+                   let deferred = gridDeferredNativeWindows().first(where: { $0.home.id == id }),
+                   deferred.matches(workspace: ws.name, monitor: request.monitor) {
+                    if args.operation.val == "activate-target" {
+                        gridPendingWorkspaces.insert(ws.name)
+                        defer { gridPendingWorkspaces.remove(ws.name) }
+                        try await gridActivateUndiscoveredNativeWindow(id, monitor: monitor)
+                        if let app = NSRunningApplication(processIdentifier: deferred.home.pid),
+                           let macApp = try await MacApp.getOrRegister(app) {
+                            _ = try await macApp.getFocusedWindow(.nonCancellable)
+                            try await normalizeLayoutReason()
+                        }
+                        guard gridNativeWindowIsVisible(id) else { return .fail(io.err("Fullscreen destination did not become visible")) }
+                    }
+                    return .succ
+                }
                 let window: Window?
                 if let id = request.window {
                     guard let selected = ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive.first(where: { $0.windowId == id }) else { return .fail(io.err("Fullscreen window no longer exists in this space")) }
@@ -255,7 +318,8 @@ struct GridLayoutCommand: Command {
                     "builtin": CGDisplayIsBuiltin(cg) != 0, "width": m.visibleRect.width, "height": m.visibleRect.height]
         }
         let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
-        let nativeHomes = gridNativeWorkspaceMonitors()
+        var nativeHomes = gridNativeWorkspaceMonitors()
+        var nativeVisible = gridNativeVisibleWindows()
         let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0)?.monitorId_oneBased }
             ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
         let boot = gridBootIdentity()
@@ -288,7 +352,12 @@ struct GridLayoutCommand: Command {
                 inventory.append(value)
             }
         }
-        let value: [String: Any] = ["windows": inventory, "nativeVisible": gridNativeVisibleWindows(), "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
+        for deferred in gridDeferredNativeWindows() {
+            inventory.append(deferred.inventory)
+            nativeHomes[deferred.home.workspace] = deferred.monitor
+            if gridNativeWindowIsVisible(deferred.home.id) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
+        }
+        let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,
                                   "focusedWindow": focus.windowOrNil.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 2]
         return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
