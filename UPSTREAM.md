@@ -9,6 +9,8 @@ The layout fork adds one versioned `grid-layout` command and preserves normal la
 
 Native Space discovery uses optional SkyLight read APIs (also documented in Hammerspoon's `hs.spaces` implementation). Native switches post Dock swipe events using the event-field technique documented by InstantSpaceSwitcher and yabai. Missing symbols and unaccepted switches return errors; no scripting addition or SIP change is required.
 
+Remembered native-fullscreen layout trees reconcile their window membership with the current workspace on snapshot and exit. Original fullscreen slots and nested ratios are preserved while closed/moved windows are removed and newly opened groups remain discoverable.
+
 The helper's existing socket/UI dependencies were not copied into the controller. AeroGrid uses a dependency-free Swift package for its own menu app, core model, and tests; the AeroSpace fork retains its pinned package dependencies.
 
 The fork uses the distinct `local.AeroGrid.Backend` bundle identity and socket namespace. It requests normal macOS Accessibility approval at startup and does not reset TCC permission entries.

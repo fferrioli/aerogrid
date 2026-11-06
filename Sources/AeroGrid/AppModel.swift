@@ -533,9 +533,10 @@ final class AppModel: ObservableObject {
     }
     func layout(_ space: Space) -> LayoutSnapshot {
         if let identity = space.nativeWindow { return LayoutSnapshot(boot:identity.boot,tree:.root([LayoutNode(id:identity.id,pid:identity.pid)])) }
-        if let json = state.dynamicMap?.layouts[space.id], let saved = try? LayoutSnapshot(json:json) { return saved }
         let windows = windows(in:space)
-        return LayoutSnapshot(boot:windows.first?.boot ?? "",tree:.root(windows.filter { !$0.floating }.map { LayoutNode(id:$0.id,pid:$0.pid) }))
+        let saved = state.dynamicMap?.layouts[space.id].flatMap { try? LayoutSnapshot(json:$0) }
+            ?? LayoutSnapshot(boot:windows.first?.boot ?? "",tree:.root([]))
+        return saved.presenting(windows:windows)
     }
     func setSpaceRect(_ id: String, _ rect: SpaceRect, displayID:String? = nil) { perform { try $0.setSpaceRect(id,rect:rect,displayID:displayID) } }
     func beginDrag(window: WindowIdentity? = nil, space: String? = nil) {

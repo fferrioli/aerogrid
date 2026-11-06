@@ -214,6 +214,38 @@ import XCTest
         XCTAssertEqual(ws.rootTilingContainer.allLeafWindowsRecursive.map(\.windowId), [1,2])
         XCTAssertEqual(first.getWeight(.h), 2)
     }
+    func testNativeSnapshotIncludesWindowsOpenedAndMovedWhileFullscreen() async throws {
+        let ws = Workspace.get(byName: name)
+        let full = TestWindow.new(id: 1, parent: ws.rootTilingContainer, adaptiveWeight: 2)
+        let closing = TestWindow.new(id: 2, parent: ws.rootTilingContainer)
+        await gridRememberNativeLayout(ws)
+        full.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        closing.unbindFromParent()
+        let group = TilingContainer.newVTiles(parent: ws.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        TestWindow.new(id: 3, parent: group, adaptiveWeight: 3)
+        TestWindow.new(id: 4, parent: group)
+        let moved = TestWindow.new(id: 5, parent: ws.rootTilingContainer)
+        _ = ws.focusWorkspace()
+        func snapshot() async throws -> GridLayoutSnapshot {
+            let result = await execute(["grid-layout", "snapshot"])
+            XCTAssertTrue(result.stderr.isEmpty)
+            return try JSONDecoder().decode(GridLayoutSnapshot.self, from: Data(result.stdout.joined().utf8))
+        }
+        func ids(_ node: GridLayoutNode) -> [UInt32] {
+            node.id.map { [$0] } ?? (node.children ?? []).flatMap(ids)
+        }
+        let first = try await snapshot()
+        XCTAssertEqual(ids(first.tree), [1, 3, 4, 5], "A native fullscreen cache must not hide new windows")
+        let savedGroup = try XCTUnwrap(first.tree.children?.first { $0.orientation == "v" })
+        XCTAssertEqual(savedGroup.children?.map(\.weight), [3, 1])
+        moved.bind(to: Workspace.get(byName: "other").rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        let second = try await snapshot()
+        XCTAssertEqual(ids(second.tree), [1, 3, 4], "A cached window moved elsewhere must disappear")
+        full.bind(to: ws.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        gridRestoreAfterNativeExit(ws)
+        XCTAssertEqual(ws.rootTilingContainer.allLeafWindowsRecursive.map(\.windowId), [1, 3, 4])
+        XCTAssertEqual(full.getWeight(.h), 2)
+    }
     func testClosedNativeWindowDoesNotLeaveAnExpiredSnapshot() async throws {
         let ws = Workspace.get(byName: name)
         let old = TestWindow.new(id: 1, parent: ws.rootTilingContainer)
@@ -225,6 +257,21 @@ import XCTest
         let result = await execute(["grid-layout", "snapshot"])
         let saved = try JSONDecoder().decode(GridLayoutSnapshot.self, from: Data(result.stdout.joined().utf8))
         XCTAssertEqual(saved.tree.children?.first?.id, fresh.windowId)
+    }
+    func testNativeExitKeepsNewNestedGroupsWithoutAnInterveningSnapshot() async {
+        let ws = Workspace.get(byName: name)
+        let full = TestWindow.new(id: 1, parent: ws.rootTilingContainer)
+        await gridRememberNativeLayout(ws)
+        full.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        let group = TilingContainer.newVTiles(parent: ws.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        TestWindow.new(id: 2, parent: group, adaptiveWeight: 3)
+        TestWindow.new(id: 3, parent: group)
+        full.bind(to: ws.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        gridRestoreAfterNativeExit(ws)
+        let restored = ws.rootTilingContainer.children.last as? TilingContainer
+        XCTAssertEqual(restored?.orientation, .v)
+        XCTAssertEqual(restored?.allLeafWindowsRecursive.map(\.windowId), [2, 3])
+        XCTAssertEqual(restored?.children.map { $0.getWeight(.v) }, [3, 1])
     }
     func testNewNativeEntryReplacesAClosedWindowCacheWithoutAnExitHook() async throws {
         let ws = Workspace.get(byName: name)

@@ -104,8 +104,10 @@ struct GridMinimumWidthTracker {
 }
 @MainActor func gridRestoreAfterNativeExit(_ workspace: Workspace) {
     guard workspace.macOsNativeFullscreenWindowsContainer.children.isEmpty,
-          let saved = gridNativeLayoutSnapshots.removeValue(forKey: workspace.name) else { return }
-    GridLayoutCommand(args: GridLayoutCmdArgs(rawArgs: [])).restore(saved, workspace)
+          var saved = gridNativeLayoutSnapshots.removeValue(forKey: workspace.name) else { return }
+    let command = GridLayoutCommand(args: GridLayoutCmdArgs(rawArgs: []))
+    saved.tree = command.reconcileNativeTree(saved.tree, workspace)
+    command.restore(saved, workspace)
 }
 private func gridBootIdentity() -> String {
     // WindowServer IDs are only meaningful during this login/boot; also check owner PID.
@@ -297,6 +299,34 @@ struct GridLayoutCommand: Command {
         let c = node as! TilingContainer
         return GridLayoutNode(weight: weight, orientation: c.orientation == .h ? "h" : "v", layout: c.layout.rawValue, children: c.children.map(captureNode))
     }
+    @MainActor fileprivate func reconcileNativeTree(_ remembered: GridLayoutNode, _ ws: Workspace) -> GridLayoutNode {
+        let normal = ws.rootTilingContainer.allLeafWindowsRecursive
+        let native = ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive
+        let owners = Dictionary(uniqueKeysWithValues: (normal + native).map { ($0.windowId, $0.app.pid) })
+        var represented = Set<UInt32>()
+        func retain(_ node: GridLayoutNode, missingOnly: Bool) -> GridLayoutNode? {
+            if let id = node.id {
+                guard owners[id] == node.pid, !missingOnly || !represented.contains(id) else { return nil }
+                represented.insert(id)
+                return node
+            }
+            var result = node
+            result.children = (node.children ?? []).compactMap { retain($0, missingOnly: missingOnly) }
+            return result.children?.isEmpty == false ? result : nil
+        }
+        let live = captureNode(ws.rootTilingContainer)
+        guard var tree = retain(remembered, missingOnly: false) else { return live }
+        // Keep fullscreen's original slot and nested ratios, but reconcile closures,
+        // moves, and windows opened since entry against the current workspace.
+        if let incoming = retain(live, missingOnly: true) {
+            if tree.orientation == incoming.orientation, tree.layout == incoming.layout {
+                tree.children = (tree.children ?? []) + (incoming.children ?? [])
+            } else {
+                tree.children = (tree.children ?? []) + [incoming]
+            }
+        }
+        return tree
+    }
     @MainActor fileprivate func snapshot(_ ws: Workspace) async throws -> String {
         let rect = ws.workspaceMonitor.visibleRect
         var floats: [GridFloat] = []
@@ -308,7 +338,14 @@ struct GridLayoutCommand: Command {
         if ws.macOsNativeFullscreenWindowsContainer.children.isEmpty {
             gridNativeLayoutSnapshots.removeValue(forKey: ws.name)
         }
-        let tree = gridNativeLayoutSnapshots[ws.name]?.tree ?? captureNode(ws.rootTilingContainer)
+        let tree: GridLayoutNode
+        if var remembered = gridNativeLayoutSnapshots[ws.name] {
+            tree = reconcileNativeTree(remembered.tree, ws)
+            remembered.tree = tree
+            gridNativeLayoutSnapshots[ws.name] = remembered
+        } else {
+            tree = captureNode(ws.rootTilingContainer)
+        }
         let saved = GridLayoutSnapshot(boot: gridBootIdentity(), tree: tree, floating: floats, focus: ws.mostRecentWindowRecursive?.windowId)
         return String(decoding: try JSONEncoder().encode(saved), as: UTF8.self)
     }
