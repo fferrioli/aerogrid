@@ -77,7 +77,7 @@ struct MiniLayoutView: View {
             .contentShape(Rectangle()).help("\(window.appName) · \(window.title)")
             .onTapGesture { onOpen?(window) }
             .accessibilityLabel("\(window.appName), \(window.title)")
-        if let model, !window.nativeFullscreen {
+        if let model {
             tile.overlay {
                 WindowDragSource(model:model,window:window,spaceID:spaceID,open:{ onOpen?(window) })
             }.opacity(model.draggedWindow == window.identity ? 0.45 : 1)
@@ -85,7 +85,7 @@ struct MiniLayoutView: View {
     }
     private func dropTarget<V:View>(_ view: V, group: Set<UInt32>) -> some View {
         view.overlay {
-            if let model, let spaceID {
+            if let model, let spaceID, model.spaces.first(where: { $0.id == spaceID })?.nativeWindow == nil {
                 WindowDropSurface(model:model,priority:2,spaceID:spaceID,group:group,acceptsFloating:false,hover:{ placement in
                     guard let placement, let incoming = model.draggedWindow,
                           let result = model.placementPreview(incoming,in:spaceID,group:group,placement:placement) else {
