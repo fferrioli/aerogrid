@@ -145,7 +145,7 @@ struct SpatialBoardView: View {
                     Button { vacancy?(point.row,point.column) } label: { Image(systemName:"plus").font(.caption).foregroundStyle(.secondary.opacity(0.55)).frame(width:vacancyFrame(point).width,height:vacancyFrame(point).height).contentShape(Rectangle()) }
                         .buttonStyle(.plain)
                         .overlay {
-                            WindowDropSurface(model:model,hover:{ placement in
+                            WindowDropSurface(model:model,displayID:display.id,hover:{ placement in
                                 windowVacancy = placement == nil ? nil : point
                             },drop:{ window,_ in
                                 model.createSpaceAt(row:point.row,column:point.column,moving:window,displayID:display.id)
@@ -297,7 +297,7 @@ private struct SpaceMiniCard: View {
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Acciones del espacio")
                 }
             }.frame(height:38)
-            MiniLayoutView(snapshot:model.layout(space),windows:model.windows(in:space),model:editable && space.nativeWindow == nil ? model : nil,spaceID:space.id,onOpen:{ window in
+            MiniLayoutView(snapshot:model.layout(space),windows:model.windows(in:space),model:editable ? model : nil,spaceID:space.id,onOpen:{ window in
                 open(); if editable { model.focusWindow(window.identity) }
             })
         }.padding(8).background(chosen ? Color.accentColor.opacity(0.16) : Color(nsColor:.windowBackgroundColor).opacity(0.22),in:RoundedRectangle(cornerRadius:10))

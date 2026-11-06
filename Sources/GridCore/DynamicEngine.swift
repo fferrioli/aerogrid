@@ -718,6 +718,7 @@ public final class DynamicEngine {
     }
     public func createSpace(nearID: String?, displayID: String?, row: Int? = nil, column: Int? = nil, moving: WindowIdentity? = nil) throws -> String {
         let id = UUID().uuidString
+        var destinationID = id
         try organize("Crear espacio") {
             let display = self.observed?.displays.first { $0.id == displayID }
                 ?? self.observed?.displays.first { $0.monitor == self.observed?.focusedMonitor }
@@ -747,13 +748,17 @@ public final class DynamicEngine {
             }
             self.editMap { $0.spaces.append(space) }
             if let moving {
-                guard let window = self.windows.first(where: { $0.identity == moving }), !window.nativeFullscreen else { throw GridError.invalid("Esta ventana ya no está disponible para mover") }
+                guard let window = self.windows.first(where: { $0.identity == moving }) else { throw GridError.invalid("Esta ventana ya no está disponible para mover") }
+                if window.nativeFullscreen {
+                    destinationID = try self.relocateFullscreen(window, to: space)
+                    return
+                }
                 let sourceID = self.map.spaces.first { $0.workspace == window.workspace && $0.nativeWindow == nil }?.id
                 try self.backend.moveVerified(window: moving, workspace: space.workspace)
                 if let sourceID { self.markEdited(sourceID) }
             }
         }
-        return id
+        return destinationID
     }
     public func removeEmptySpace(_ id:String) throws {
         let originalDesktop = observed, originalCursors = map.cursors
@@ -938,7 +943,12 @@ public final class DynamicEngine {
         }
         try organize("Mover ventana") {
             guard let live = self.windows.first(where: { $0.identity == identity }), let target = self.map.spaces.first(where: { $0.id == destinationID }) else { throw GridError.stale }
-            guard !live.nativeFullscreen, target.nativeWindow == nil else { throw GridError.invalid("Salí de fullscreen para reagrupar esta ventana; podés mover su casillero completo") }
+            if live.nativeFullscreen {
+                guard layout == nil else { throw GridError.invalid("Elegí un espacio vacío para mover una app en fullscreen") }
+                _ = try self.relocateFullscreen(live, to: target)
+                return
+            }
+            guard target.nativeWindow == nil else { throw GridError.invalid("Elegí un espacio sin fullscreen para reagrupar esta ventana") }
             let source = self.map.spaces.first { $0.workspace == live.workspace && $0.nativeWindow == nil }
             try self.backend.moveVerified(window: identity, workspace: target.workspace)
             if let layout, let orientation {
@@ -948,6 +958,51 @@ public final class DynamicEngine {
             if let source { self.markEdited(source.id) }
             self.markEdited(target.id)
         }
+    }
+    private func relocateFullscreen(_ window: WindowInfo, to target: Space) throws -> String {
+        guard let sourceIndex = map.spaces.firstIndex(where: { $0.nativeWindow == window.identity }),
+              let targetIndex = map.spaces.firstIndex(where: { $0.id == target.id }) else { throw GridError.stale }
+        let source = map.spaces[sourceIndex]
+        if source.id == target.id { return source.id }
+        let fullscreenOwners = Set(windows.filter(\.nativeFullscreen).map(\.identity))
+        let hasPendingWindows = observed?.windowHomes?.contains { home in
+            home.workspace == target.workspace && !fullscreenOwners.contains(WindowIdentity(id: home.id, pid: home.pid, boot: home.boot))
+        } ?? false
+        guard target.nativeWindow == nil, contents(of: target).isEmpty, !hasPendingWindows else {
+            throw GridError.invalid("Elegí un espacio vacío o un + para mover una app en fullscreen")
+        }
+        let combined = observed?.displays.count == 1
+        let targetDisplay: Display?
+        if combined { targetDisplay = observed?.displays.first }
+        else {
+            targetDisplay = target.preferredDisplay.flatMap { id in observed?.displays.first { $0.id == id } }
+                ?? observed?.displays.first { role($0) == target.preferredRole }
+        }
+        guard let monitor = targetDisplay?.monitor, window.nativeMonitor == monitor else {
+            throw GridError.invalid("El fullscreen pertenece a otra pantalla física")
+        }
+        var next = map
+        // Move map rectangles only: the window keeps its exact native Space and home.
+        if combined {
+            let projected = map.projectedSpaces(combined: true)
+            guard let origin = projected.first(where: { $0.id == source.id }),
+                  let destination = projected.first(where: { $0.id == target.id }) else { throw GridError.stale }
+            next.spaces[sourceIndex].foldedRect = destination.rect
+            next.spaces[targetIndex].foldedRect = origin.rect
+        } else {
+            next.spaces[sourceIndex].rect = target.rect
+            next.spaces[targetIndex].rect = source.rect
+            next.spaces[sourceIndex].foldedRect = nil; next.spaces[targetIndex].foldedRect = nil
+            next.spaces[sourceIndex].boardID = target.board
+            next.spaces[sourceIndex].preferredRole = target.preferredRole; next.spaces[sourceIndex].preferredDisplay = target.preferredDisplay
+            next.spaces[targetIndex].boardID = source.board
+            next.spaces[targetIndex].preferredRole = source.preferredRole; next.spaces[targetIndex].preferredDisplay = source.preferredDisplay
+        }
+        next.spaces[sourceIndex].dormant = false; next.spaces[sourceIndex].userCreated = true
+        next.spaces[targetIndex].dormant = false; next.spaces[targetIndex].userCreated = true
+        try next.validate(); state.dynamicMap = next
+        markEdited(source.id); markEdited(target.id)
+        return source.id
     }
     public func placeWindow(_ identity: WindowIdentity, in destinationID: String, group: Set<UInt32>, placement: WindowPlacement, expectedTarget: LayoutNode? = nil, expectedSourceWorkspace: String? = nil) throws {
         try organize("Distribuir ventana") {

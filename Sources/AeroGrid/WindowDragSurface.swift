@@ -7,13 +7,14 @@ struct WindowDropSurface: NSViewRepresentable {
     let model: AppModel
     var priority = 0
     var spaceID: String?
+    var displayID: String?
     var group: Set<UInt32> = []
     var acceptsFloating = true
     var hover: ((GridCore.WindowPlacement?) -> Void)?
     let drop: (WindowIdentity,GridCore.WindowPlacement) -> Void
     func makeNSView(context:Context) -> WindowDropSurfaceView { WindowDropSurfaceView() }
     func updateNSView(_ view:WindowDropSurfaceView,context:Context) {
-        view.model = model; view.priority = priority; view.spaceID = spaceID; view.group = group
+        view.model = model; view.priority = priority; view.spaceID = spaceID; view.displayID = displayID; view.group = group
         view.acceptsFloating = acceptsFloating; view.hover = hover; view.drop = drop
     }
 }
@@ -23,6 +24,7 @@ final class WindowDropSurfaceView: NSView {
     weak var model: AppModel?
     var priority = 0
     var spaceID: String?
+    var displayID: String?
     var group: Set<UInt32> = []
     var acceptsFloating = true
     var hover: ((GridCore.WindowPlacement?) -> Void)?
@@ -38,17 +40,32 @@ final class WindowDropSurfaceView: NSView {
         guard let window, let content = window.contentView,
               content.bounds.contains(content.convert(point,from:nil)) else { return nil }
         return surfaces.allObjects.filter { view in
-            guard view.window === window, !view.isHiddenOrHasHiddenAncestor, !view.group.contains(identity.id),
-                  let live = view.model?.desktop?.windows?.first(where: { $0.identity == identity }), !live.nativeFullscreen,
-                  view.acceptsFloating || !live.floating else { return false }
-            if view.group.isEmpty, let spaceID = view.spaceID,
-               view.model?.spaces.first(where: { $0.id == spaceID })?.workspace == live.workspace { return false }
+            guard view.window === window, !view.isHiddenOrHasHiddenAncestor, view.accepts(identity) else { return false }
             let local = view.convert(point,from:nil)
             return view.bounds.contains(local) && view.visibleRect.contains(local)
         }.sorted {
             if $0.priority != $1.priority { return $0.priority > $1.priority }
             return $0.bounds.width*$0.bounds.height < $1.bounds.width*$1.bounds.height
         }.first
+    }
+    func accepts(_ identity: WindowIdentity) -> Bool {
+        guard let model, !group.contains(identity.id),
+              let live = model.desktop?.windows?.first(where: { $0.identity == identity }),
+              acceptsFloating || !live.floating else { return false }
+        let target = spaceID.flatMap { id in model.spaces.first { $0.id == id } }
+        if live.nativeFullscreen {
+            guard group.isEmpty else { return false }
+            if spaceID != nil {
+                guard let target, target.nativeWindow == nil, model.windows(in:target).isEmpty else { return false }
+            }
+            let display: Display?
+            if let target { display = model.desktop?.displays.first { model.boardSpaces($0).contains { $0.id == target.id } } }
+            else { display = model.desktop?.displays.first { $0.id == displayID } }
+            guard let monitor = display?.monitor else { return false }
+            return live.nativeMonitor == monitor
+        }
+        if target?.nativeWindow != nil { return false }
+        return !group.isEmpty || target?.workspace != live.workspace
     }
     func update(at point:NSPoint) -> GridCore.WindowPlacement {
         let local = convert(point,from:nil)
