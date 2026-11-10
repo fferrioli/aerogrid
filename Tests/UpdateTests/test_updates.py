@@ -106,10 +106,56 @@ class UpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             job = pathlib.Path(temporary)
             (job / "install").touch()
-            with patch.object(worker, "running_bundles", return_value=True), patch.object(worker.time, "monotonic", side_effect=[0, 0, 61]), patch.object(worker.os, "killpg") as kill:
+            with patch.object(worker, "run_command") as shutdown, patch.object(worker, "running_bundles", return_value=True), patch.object(worker.time, "monotonic", side_effect=[0, 0, 61]), patch.object(worker.os, "killpg") as kill:
                 with self.assertRaisesRegex(RuntimeError, "siguen abiertos"):
-                    worker.await_handoff(job, job)
+                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
+                shutdown.assert_called_once_with(["prepared-app", "--finish-update", str(job)], job, timeout=30, cancellable=False)
                 kill.assert_not_called()
+
+    def testNoShutdownIsRequestedBeforeTheFrontendAuthorizesInstallation(self):
+        worker = module("update-worker")
+        with tempfile.TemporaryDirectory() as temporary:
+            job = pathlib.Path(temporary)
+            (job / "cancel").touch()
+            with patch.object(worker, "run_command") as shutdown:
+                with self.assertRaises(worker.Cancelled):
+                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
+                shutdown.assert_not_called()
+
+    def testDeclinedNormalShutdownPreventsReplacement(self):
+        worker = module("update-worker")
+        with tempfile.TemporaryDirectory() as temporary:
+            job = pathlib.Path(temporary)
+            (job / "install").touch()
+            with patch.object(worker, "run_command", side_effect=RuntimeError("Quit declined")), patch.object(worker, "running_bundles") as check:
+                with self.assertRaisesRegex(RuntimeError, "No se pudo cerrar"):
+                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
+                check.assert_not_called()
+
+    def testProcessCheckIgnoresHelperArgumentsButDetectsBothInstalledExecutables(self):
+        worker = module("update-worker")
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            for name, executable in [("AeroGrid", "AeroGrid"), ("AeroGrid Backend", "AeroSpace")]:
+                path = home / f"Applications/{name}.app/Contents/MacOS/{executable}"
+                path.parent.mkdir(parents=True)
+                helper = subprocess.Popen(["/usr/bin/python3", "-c", "import time; time.sleep(30)", str(path)])
+                try:
+                    self.assertFalse(worker.running_bundles(home), "An app path in helper arguments is not a running app")
+                finally:
+                    helper.terminate(); helper.wait(timeout=5)
+                path.symlink_to("/bin/sleep")
+                app = subprocess.Popen([str(path), "30"])
+                try:
+                    self.assertTrue(worker.running_bundles(home), "An installed executable with arguments must block replacement")
+                finally:
+                    app.terminate(); app.wait(timeout=5)
+
+    def testProcessInspectionFailureRefusesHandoff(self):
+        worker = module("update-worker")
+        with patch.object(worker.subprocess, "run", return_value=types.SimpleNamespace(returncode=2)):
+            with self.assertRaisesRegex(RuntimeError, "comprobar"):
+                worker.running_bundles(pathlib.Path("/unused"))
 
     def testInstallationCannotBeInterruptedByCancellationOrBuildTimeout(self):
         worker = module("update-worker")

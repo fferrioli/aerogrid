@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import plistlib
+import subprocess
 import tempfile
 import types
 import unittest
@@ -166,6 +167,32 @@ class InstallerTests(unittest.TestCase):
         installer = module("install")
         with patch.object(installer.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)):
             with self.assertRaisesRegex(RuntimeError, "Quit AeroGrid"):
+                installer.ensure_apps_stopped()
+
+    def testInstallerIgnoresHelperArgumentsButRefusesRealInstalledProcesses(self):
+        installer = module("install")
+        with tempfile.TemporaryDirectory() as temporary:
+            installer.APPS = pathlib.Path(temporary) / "Applications"
+            for name, executable in [("AeroGrid", "AeroGrid"), ("AeroGrid Backend", "AeroSpace")]:
+                path = installer.APPS / f"{name}.app/Contents/MacOS/{executable}"
+                path.parent.mkdir(parents=True)
+                helper = subprocess.Popen(["/usr/bin/python3", "-c", "import time; time.sleep(30)", str(path)])
+                try:
+                    installer.ensure_apps_stopped()
+                finally:
+                    helper.terminate(); helper.wait(timeout=5)
+                path.symlink_to("/bin/sleep")
+                app = subprocess.Popen([str(path), "30"])
+                try:
+                    with self.assertRaisesRegex(RuntimeError, f"Quit {name}"):
+                        installer.ensure_apps_stopped()
+                finally:
+                    app.terminate(); app.wait(timeout=5)
+
+    def testInstallerRefusesWhenProcessInspectionFails(self):
+        installer = module("install")
+        with patch.object(installer.subprocess, "run", return_value=types.SimpleNamespace(returncode=2)):
+            with self.assertRaisesRegex(RuntimeError, "Cannot check"):
                 installer.ensure_apps_stopped()
 
     def testTomlLiteralNamesCommentsAndMultilineCallbacksArePreserved(self):

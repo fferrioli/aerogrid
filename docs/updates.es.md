@@ -7,6 +7,8 @@ Hacé clic derecho en el ícono de AeroGrid de la barra superior. Si hay una act
 3. Cuando termina de prepararse, AeroGrid se cierra, instala ambos componentes y vuelve a abrirse. Tus ventanas no se cierran.
 4. Si macOS pide renovar Accesibilidad, habilitá **AeroGrid** y **AeroGrid Backend** y pulsá **Recuperar**.
 
+No hace falta cerrar AeroGrid antes de pulsar **Actualizar**: la app coordina su propio cierre cuando la compilación está lista. El actualizador reintenta un cierre normal de ambos componentes desde la build preparada y comprueba que hayan terminado antes de reemplazarlos. Nunca fuerza su cierre. Los comandos de compilación o ayuda que mencionan la ruta de AeroGrid no cuentan como una instancia abierta.
+
 **Buscar actualizaciones automáticamente** está activado inicialmente. Comprueba después de iniciar y cada seis horas; podés desactivarlo desde el menú y seguir buscando manualmente. La búsqueda nunca instala nada sin que pulses Actualizar.
 
 ## Qué necesita
@@ -21,7 +23,7 @@ La actualización usa una carpeta aislada; no modifica tu checkout, tus cambios 
 
 - **Sin conexión o GitHub no responde:** volvé a buscar más tarde. La app actual sigue funcionando.
 - **Faltan herramientas o falla la compilación:** abrí **Detalles de la actualización…**. Podés ver el registro o reintentar; la app no se cierra durante la preparación.
-- **AeroGrid o el backend no terminan:** no se reemplazan archivos de una app en ejecución. Cerrá la instancia que siga abierta y volvé a intentar.
+- **AeroGrid o el backend no terminan:** el actualizador pide un cierre normal de ambos; si no lo aceptan, conserva la instalación y muestra el error. No reemplaza archivos de una app en ejecución. Si una versión anterior se queda atascada en este paso, prepará una [actualización manual](../README.md#build-and-install), elegí **Salir de AeroGrid** una vez que termine la compilación y ejecutá el instalador. La versión corregida vuelve a coordinar el cierre desde el menú.
 - **La instalación falla:** el instalador revierte sus cambios y el actualizador intenta volver a abrir la app conservada.
 - **La preparación se interrumpió:** el menú vuelve a permitir reintentar después de abrir AeroGrid.
 

@@ -235,6 +235,11 @@ struct AeroGridMain {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: "local.AeroGrid").filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if args.first == "--finish-update", args.count == 2 {
+            do { try UpdateShutdown.run(job: URL(fileURLWithPath: args[1])) }
+            catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
         if args.first == "--benchmark-idle", args.count == 2 {
             do { try IdlePerformanceVerification.run(output: URL(fileURLWithPath: args[1])) }
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
