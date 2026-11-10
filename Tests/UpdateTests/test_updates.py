@@ -111,6 +111,31 @@ class UpdateTests(unittest.TestCase):
                     worker.await_handoff(job, job)
                 kill.assert_not_called()
 
+    def testProcessCheckIgnoresHelperArgumentsButDetectsBothInstalledExecutables(self):
+        worker = module("update-worker")
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            for name, executable in [("AeroGrid", "AeroGrid"), ("AeroGrid Backend", "AeroSpace")]:
+                path = home / f"Applications/{name}.app/Contents/MacOS/{executable}"
+                path.parent.mkdir(parents=True)
+                helper = subprocess.Popen(["/usr/bin/python3", "-c", "import time; time.sleep(30)", str(path)])
+                try:
+                    self.assertFalse(worker.running_bundles(home), "An app path in helper arguments is not a running app")
+                finally:
+                    helper.terminate(); helper.wait(timeout=5)
+                path.symlink_to("/bin/sleep")
+                app = subprocess.Popen([str(path), "30"])
+                try:
+                    self.assertTrue(worker.running_bundles(home), "An installed executable with arguments must block replacement")
+                finally:
+                    app.terminate(); app.wait(timeout=5)
+
+    def testProcessInspectionFailureRefusesHandoff(self):
+        worker = module("update-worker")
+        with patch.object(worker.subprocess, "run", return_value=types.SimpleNamespace(returncode=2)):
+            with self.assertRaisesRegex(RuntimeError, "comprobar"):
+                worker.running_bundles(pathlib.Path("/unused"))
+
     def testInstallationCannotBeInterruptedByCancellationOrBuildTimeout(self):
         worker = module("update-worker")
         with tempfile.TemporaryDirectory() as temporary:

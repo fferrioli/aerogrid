@@ -26,11 +26,7 @@ import GridCore
         do {
             let model = try AppModel(); self.model = model
             let updates = AppUpdates(directory: model.directory); self.updates = updates
-            updates.onReadyToInstall = { [weak updates] in
-                guard let updates else { return }
-                do { try updates.handOff(); NSApp.terminate(nil) }
-                catch { updates.fail(error.localizedDescription) }
-            }
+            updates.onReadyToInstall = { [weak self] in self?.finishPreparedUpdate() }
             model.showOverview = { [weak self] in self?.openOverview() }
             model.closeOverview = { [weak self] restore in self?.closeOverview(restoreFocus: restore) }
             model.resizeOverview = { [weak self] size in self?.resizeOverview(to:size) }
@@ -130,6 +126,15 @@ import GridCore
     @objc func updatePrimary() { if updates?.canInstall == true { updates?.install() } else { updates?.check() } }
     @objc func checkUpdates() { updates?.check() }
     @objc func cancelUpdate() { updates?.cancel() }
+    func finishPreparedUpdate() {
+        guard let updates else { return }
+        do {
+            try updates.handOff()
+            // AppKit waits in a nested termination loop. Leave the MainActor callback
+            // first so prepareToQuit's main-queue reply can run inside that loop.
+            RunLoop.main.perform(inModes: [.common]) { NSApp.terminate(nil) }
+        } catch { updates.fail(error.localizedDescription) }
+    }
     @objc func updateDetails() { updates?.showDetails() }
     @objc func toggleAutomaticUpdates() {
         updates?.automatic.toggle(); refreshActionsMenu()
@@ -235,6 +240,11 @@ struct AeroGridMain {
     @MainActor static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         let otherInstances = NSRunningApplication.runningApplications(withBundleIdentifier: "local.AeroGrid").filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if args.first == "--verify-update-termination", args.count == 2 {
+            do { try UpdateTerminationVerification.run(output: URL(fileURLWithPath: args[1])) }
+            catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
         if args.first == "--benchmark-idle", args.count == 2 {
             do { try IdlePerformanceVerification.run(output: URL(fileURLWithPath: args[1])) }
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }

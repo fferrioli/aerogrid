@@ -150,7 +150,9 @@ def extract_archive(archive, destination, revision):
 def running_bundles(home):
     for app, executable in [("AeroGrid", "AeroGrid"), ("AeroGrid Backend", "AeroSpace")]:
         path = home / f"Applications/{app}.app/Contents/MacOS/{executable}"
-        result = subprocess.run(["/usr/bin/pgrep", "-f", re.escape(str(path))], capture_output=True, timeout=5)
+        # Match argv[0], not a build/helper command that merely mentions this path.
+        pattern = "^" + re.escape(str(path)) + r"([[:space:]]|$)"
+        result = subprocess.run(["/usr/bin/pgrep", "-f", pattern], capture_output=True, timeout=5)
         if result.returncode == 0:
             return True
         if result.returncode != 1:

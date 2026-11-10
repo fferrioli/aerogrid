@@ -52,9 +52,12 @@ def reset_changed_adhoc_permissions(previous, current):
 def ensure_apps_stopped():
     for name, executable in [("AeroGrid", "AeroGrid"), ("AeroGrid Backend", "AeroSpace")]:
         path = APPS / f"{name}.app/Contents/MacOS/{executable}"
-        found = subprocess.run(["pgrep", "-f", re.escape(str(path))], capture_output=True)
+        pattern = "^" + re.escape(str(path)) + r"([[:space:]]|$)"
+        found = subprocess.run(["/usr/bin/pgrep", "-f", pattern], capture_output=True, timeout=5)
         if found.returncode == 0:
             raise RuntimeError(f"Quit {name} before installing. No installed files were changed.")
+        if found.returncode != 1:
+            raise RuntimeError(f"Cannot check whether {name} is running. No installed files were changed.")
 
 
 def validate_configuration(configuration):
