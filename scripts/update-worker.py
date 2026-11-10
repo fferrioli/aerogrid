@@ -170,19 +170,13 @@ def verify_controller(pid, home):
         raise ValueError("La actualización no fue iniciada por AeroGrid instalado")
 
 
-def await_handoff(job, home, shutdown_command, timeout=900):
+def await_handoff(job, home, timeout=900):
     deadline = time.monotonic() + timeout
     while not (job / "install").exists():
         check_cancel(job)
         if time.monotonic() > deadline:
             raise RuntimeError("AeroGrid no confirmó la instalación. No se modificaron las apps.")
         time.sleep(0.2)
-    # The UI has authorized installation. Retry normal AppKit quit requests from
-    # the prepared build, including a backend left behind by the departing UI.
-    try:
-        run_command(shutdown_command, job, timeout=30, cancellable=False)
-    except RuntimeError as error:
-        raise RuntimeError("No se pudo cerrar AeroGrid o su backend para actualizar. La instalación anterior se conserva; consultá el registro.") from error
     # No cancellations once the UI has requested the atomic installation.
     deadline = time.monotonic() + 60
     while running_bundles(home):
@@ -229,7 +223,7 @@ def update(job, home):
     run_command([str(root / ".build/release/AeroGrid"), "--validate-config", str(config)], job, timeout=30)
     status(job, "ready", "Lista para instalar y reiniciar…")
     try:
-        await_handoff(job, home, [str(root / ".build/release/AeroGrid"), "--finish-update", str(job)])
+        await_handoff(job, home)
         backup_state(home, job)
         status(job, "installing", "Instalando y reiniciando AeroGrid…")
         run_command([sys.executable, "scripts/install.py"], job, cwd=root, timeout=120, cancellable=False)

@@ -106,31 +106,10 @@ class UpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             job = pathlib.Path(temporary)
             (job / "install").touch()
-            with patch.object(worker, "run_command") as shutdown, patch.object(worker, "running_bundles", return_value=True), patch.object(worker.time, "monotonic", side_effect=[0, 0, 61]), patch.object(worker.os, "killpg") as kill:
+            with patch.object(worker, "running_bundles", return_value=True), patch.object(worker.time, "monotonic", side_effect=[0, 0, 61]), patch.object(worker.os, "killpg") as kill:
                 with self.assertRaisesRegex(RuntimeError, "siguen abiertos"):
-                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
-                shutdown.assert_called_once_with(["prepared-app", "--finish-update", str(job)], job, timeout=30, cancellable=False)
+                    worker.await_handoff(job, job)
                 kill.assert_not_called()
-
-    def testNoShutdownIsRequestedBeforeTheFrontendAuthorizesInstallation(self):
-        worker = module("update-worker")
-        with tempfile.TemporaryDirectory() as temporary:
-            job = pathlib.Path(temporary)
-            (job / "cancel").touch()
-            with patch.object(worker, "run_command") as shutdown:
-                with self.assertRaises(worker.Cancelled):
-                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
-                shutdown.assert_not_called()
-
-    def testDeclinedNormalShutdownPreventsReplacement(self):
-        worker = module("update-worker")
-        with tempfile.TemporaryDirectory() as temporary:
-            job = pathlib.Path(temporary)
-            (job / "install").touch()
-            with patch.object(worker, "run_command", side_effect=RuntimeError("Quit declined")), patch.object(worker, "running_bundles") as check:
-                with self.assertRaisesRegex(RuntimeError, "No se pudo cerrar"):
-                    worker.await_handoff(job, job, ["prepared-app", "--finish-update", str(job)])
-                check.assert_not_called()
 
     def testProcessCheckIgnoresHelperArgumentsButDetectsBothInstalledExecutables(self):
         worker = module("update-worker")

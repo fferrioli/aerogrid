@@ -7,7 +7,7 @@ Hacé clic derecho en el ícono de AeroGrid de la barra superior. Si hay una act
 3. Cuando termina de prepararse, AeroGrid se cierra, instala ambos componentes y vuelve a abrirse. Tus ventanas no se cierran.
 4. Si macOS pide renovar Accesibilidad, habilitá **AeroGrid** y **AeroGrid Backend** y pulsá **Recuperar**.
 
-No hace falta cerrar AeroGrid antes de pulsar **Actualizar**: la app coordina su propio cierre cuando la compilación está lista. El actualizador reintenta un cierre normal de ambos componentes desde la build preparada y comprueba que hayan terminado antes de reemplazarlos. Nunca fuerza su cierre. Los comandos de compilación o ayuda que mencionan la ruta de AeroGrid no cuentan como una instancia abierta.
+No hace falta cerrar AeroGrid antes de pulsar **Actualizar**: la app coordina su propio cierre cuando la compilación está lista. El actualizador comprueba que ambos componentes hayan terminado antes de reemplazarlos. Nunca fuerza su cierre. Los comandos de compilación o ayuda que mencionan la ruta de AeroGrid no cuentan como una instancia abierta.
 
 **Buscar actualizaciones automáticamente** está activado inicialmente. Comprueba después de iniciar y cada seis horas; podés desactivarlo desde el menú y seguir buscando manualmente. La búsqueda nunca instala nada sin que pulses Actualizar.
 
