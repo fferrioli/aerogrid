@@ -87,8 +87,8 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-5 Backend: retener ventanas fullscreen | SUB-impl | hecho | | 2026-11-12 |
 | F0-6 Backend: salida de fullscreen corroborada | SUB-impl | hecho | | 2026-11-12 |
 | F0-7 Backend: inyección de falla en vivo | SUB-impl | hecho | | 2026-11-12 |
-| F0-8 Revisión independiente | SUB-rev | en curso | | |
-| F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | pendiente | | |
+| F0-8 Revisión independiente | SUB-rev | hecho | | 2026-11-12 |
+| F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | en curso | | |
 | F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
 | F1-1 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
