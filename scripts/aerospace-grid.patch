@@ -154,13 +154,49 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..dc26c14
+index 0000000..434ae7e
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,590 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
++
++struct GridDebugBlindness: Equatable {
++    var expires: TimeInterval
++    var forget: Bool
++}
++struct GridDebugBlindRequest: Decodable {
++    var windowID: UInt32
++    var seconds: Double
++    var forget: Bool = false
++}
++func gridUpdatedBlindness(_ current: [UInt32: GridDebugBlindness], windowID: UInt32,
++                         seconds: Double, forget: Bool, now: TimeInterval) throws -> [UInt32: GridDebugBlindness] {
++    guard seconds.isFinite, seconds == 0 || (1...600).contains(seconds) else {
++        throw NSError(domain: "GridDebugBlind", code: 1)
++    }
++    var result = current
++    result[windowID] = seconds == 0 ? nil : GridDebugBlindness(expires: now + seconds, forget: forget)
++    return result
++}
++func gridFilterBlindWindows<Key: Hashable>(_ lists: [Key: [UInt32]],
++    blindness: [UInt32: GridDebugBlindness], now: TimeInterval)
++    -> (lists: [Key: [UInt32]], blindness: [UInt32: GridDebugBlindness]) {
++    let active = blindness.filter { $0.value.expires > now }
++    return (lists.mapValues { $0.filter { active[$0] == nil } }, active)
++}
++@MainActor var gridDebugBlindness: [UInt32: GridDebugBlindness] = [:]
++@MainActor private func gridScheduleDebugBlindRefresh(_ event: RefreshSessionEvent, after delay: TimeInterval) {
++    Task { @MainActor in
++        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
++        scheduleCancellableCompleteRefreshSession(event)
++    }
++}
++@MainActor private func gridDebugForgets(_ id: UInt32) -> Bool {
++    guard let state = gridDebugBlindness[id] else { return false }
++    return gridOwnsBackendUI() && state.forget && state.expires > ProcessInfo.processInfo.systemUptime
++}
 +
 +struct GridLayoutNode: Codable {
 +    var id: UInt32?
@@ -213,7 +249,7 @@ index 0000000..dc26c14
 +}
 +
 +@MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
-+    guard let workspace = window.nodeWorkspace else { return }
++    guard !gridDebugForgets(window.windowId), let workspace = window.nodeWorkspace else { return }
 +    var floating = window.isFloating
 +    if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
 +    gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
@@ -251,7 +287,7 @@ index 0000000..dc26c14
 +@MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 +
 +@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
-+    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
++    let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
 +    guard !pending.isEmpty else { return [] }
 +    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
 +    var owners: [UInt32: Int32] = [:]
@@ -357,9 +393,25 @@ index 0000000..dc26c14
 +}
 +struct GridLayoutCommand: Command {
 +    let args: GridLayoutCmdArgs
-+    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot"].contains(args.operation.val) }
++    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot", "debug-blind"].contains(args.operation.val) }
 +    func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
 +        do {
++            if args.operation.val == "debug-blind" {
++                guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
++                guard let data = args.data else { return .fail(io.err("Expected debug blindness JSON")) }
++                let request = try JSONDecoder().decode(GridDebugBlindRequest.self, from: Data(data.utf8))
++                let now = ProcessInfo.processInfo.systemUptime
++                gridDebugBlindness = try gridUpdatedBlindness(gridDebugBlindness, windowID: request.windowID,
++                    seconds: request.seconds, forget: request.forget, now: now)
++                if gridDebugForgets(request.windowID) { gridForgetRecoveredWindowHome(request.windowID) }
++                // Socket commands run light sessions, which never collect or discover windows. Schedule complete
++                // refreshes so the blindness takes effect now and lifts at expiry even when no other event arrives.
++                gridScheduleDebugBlindRefresh(.socketServer(args), after: 0.1)
++                if request.seconds > 0 { gridScheduleDebugBlindRefresh(.socketServer(args), after: request.seconds + 0.2) }
++                let response = try JSONSerialization.data(withJSONObject: ["windowID": Double(request.windowID),
++                    "seconds": max(0, (gridDebugBlindness[request.windowID]?.expires ?? now) - now)])
++                return .succ(io.out(String(decoding: response, as: UTF8.self)))
++            }
 +            if args.operation.val == "management-status" { return .succ(io.out(try gridManagementStatus())) }
 +            if args.operation.val == "status" {
 +                guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
@@ -533,6 +585,7 @@ index 0000000..dc26c14
 +               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
 +        }
 +        for home in Array(gridPendingWindowHomes.values) {
++            if gridDebugForgets(home.id) { gridForgetRecoveredWindowHome(home.id); continue }
 +            var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
 +            let app = NSRunningApplication(processIdentifier: home.pid)
 +            if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
@@ -1060,7 +1113,7 @@ index 41756e5..25fc73c 100644
              // Gaps. Consider 4 cases:
              // 1. Multiple children. Layout first child
 diff --git a/Sources/AppBundle/layout/refresh.swift b/Sources/AppBundle/layout/refresh.swift
-index 5e10321..d857ec4 100644
+index 5e10321..7a716b8 100644
 --- a/Sources/AppBundle/layout/refresh.swift
 +++ b/Sources/AppBundle/layout/refresh.swift
 @@ -34,7 +34,7 @@ func runHeavyCompleteRefreshSession(
@@ -1081,6 +1134,20 @@ index 5e10321..d857ec4 100644
          let focusBefore = focus.windowOrNil
  
          await refreshModel_nonCancellable()
+@@ -122,7 +122,12 @@ func refreshModel_nonCancellable() async {
+ @MainActor
+ private func refresh() async throws {
+     // Garbage collect terminated apps and windows before working with all windows
+-    let mapping = try await MacApp.refreshAllAndGetAliveWindowIds(frontmostAppBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
++    var mapping = try await MacApp.refreshAllAndGetAliveWindowIds(frontmostAppBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
++    if gridOwnsBackendUI() && !gridDebugBlindness.isEmpty {
++        let filtered = gridFilterBlindWindows(mapping, blindness: gridDebugBlindness, now: ProcessInfo.processInfo.systemUptime)
++        mapping = filtered.lists
++        gridDebugBlindness = filtered.blindness
++    }
+     let aliveWindowIds = mapping.values.flatMap(id).toSet()
+ 
+     for window in MacWindow.allWindows {
 diff --git a/Sources/AppBundle/normalizeLayoutReason.swift b/Sources/AppBundle/normalizeLayoutReason.swift
 index 3069eff..e3e1306 100644
 --- a/Sources/AppBundle/normalizeLayoutReason.swift
@@ -1459,6 +1526,39 @@ index 9d0d606..f56fc66 100644
  protocol ReadableAttr: Sendable {
      associatedtype T
      var getter: @Sendable (AnyObject) -> T? { get }
+diff --git a/Sources/AppBundleTests/GridDebugBlindTest.swift b/Sources/AppBundleTests/GridDebugBlindTest.swift
+new file mode 100644
+index 0000000..242a9b1
+--- /dev/null
++++ b/Sources/AppBundleTests/GridDebugBlindTest.swift
+@@ -0,0 +1,27 @@
++@testable import AppBundle
++import XCTest
++import Common
++
++final class GridDebugBlindTest: XCTestCase {
++    @MainActor func testStandaloneRejectsOperation() async {
++        XCTAssertFalse(gridOwnsBackendUI())
++        let io = CmdIoImpl(stdin: .emptyStdin)
++        _ = await parseCommand(["grid-layout", "--data", "{\"windowID\":2,\"seconds\":1,\"forget\":false}", "debug-blind"]).cmdOrDie.run(.defaultEnv, io)
++        XCTAssertEqual(io.stderr.joined(), "Unknown grid-layout operation")
++    }
++    func testFilteringExpiryAndForget() {
++        let result = gridFilterBlindWindows([1: [UInt32(2), 3, 4]], blindness: [
++            2: GridDebugBlindness(expires: 11, forget: true),
++            3: GridDebugBlindness(expires: 10, forget: false),
++        ], now: 10)
++        XCTAssertEqual(result.lists[1], [3, 4])
++        XCTAssertEqual(result.blindness, [2: GridDebugBlindness(expires: 11, forget: true)])
++    }
++    func testCancellationAndRange() throws {
++        let active = try gridUpdatedBlindness([:], windowID: 2, seconds: 600, forget: true, now: 10)
++        XCTAssertTrue(try gridUpdatedBlindness(active, windowID: 2, seconds: 0, forget: false, now: 11).isEmpty)
++        for seconds in [-1.0, 0.5, 601, .infinity, .nan] {
++            XCTAssertThrowsError(try gridUpdatedBlindness([:], windowID: 2, seconds: seconds, forget: false, now: 10))
++        }
++    }
++}
 diff --git a/Sources/AppBundleTests/GridFocusRecoveryTest.swift b/Sources/AppBundleTests/GridFocusRecoveryTest.swift
 new file mode 100644
 index 0000000..ac1db6e
@@ -2255,7 +2355,7 @@ index effe43e..4bfd20f 100644
              case .layout:
 diff --git a/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift b/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift
 new file mode 100644
-index 0000000..6948a2c
+index 0000000..acd6f95
 --- /dev/null
 +++ b/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift
 @@ -0,0 +1,12 @@
@@ -2266,7 +2366,7 @@ index 0000000..6948a2c
 +    public var data: String? = nil
 +    public static let parser: CmdParser<Self> = .init(
 +        kind: .gridLayout,
-+        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate)",
++        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate|debug-blind)",
 +        flags: ["--workspace": workspaceSubArgParser(), "--data": singleValueSubArgParser(\.data, "JSON", { .success($0) })],
 +        posArgs: [newMandatoryPosArgParser(\.operation, consumeStrCliArg, placeholder: "<operation>")]
 +    )

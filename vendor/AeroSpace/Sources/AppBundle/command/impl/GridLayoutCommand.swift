@@ -2,6 +2,42 @@
 import AppKit
 import Common
 
+struct GridDebugBlindness: Equatable {
+    var expires: TimeInterval
+    var forget: Bool
+}
+struct GridDebugBlindRequest: Decodable {
+    var windowID: UInt32
+    var seconds: Double
+    var forget: Bool = false
+}
+func gridUpdatedBlindness(_ current: [UInt32: GridDebugBlindness], windowID: UInt32,
+                         seconds: Double, forget: Bool, now: TimeInterval) throws -> [UInt32: GridDebugBlindness] {
+    guard seconds.isFinite, seconds == 0 || (1...600).contains(seconds) else {
+        throw NSError(domain: "GridDebugBlind", code: 1)
+    }
+    var result = current
+    result[windowID] = seconds == 0 ? nil : GridDebugBlindness(expires: now + seconds, forget: forget)
+    return result
+}
+func gridFilterBlindWindows<Key: Hashable>(_ lists: [Key: [UInt32]],
+    blindness: [UInt32: GridDebugBlindness], now: TimeInterval)
+    -> (lists: [Key: [UInt32]], blindness: [UInt32: GridDebugBlindness]) {
+    let active = blindness.filter { $0.value.expires > now }
+    return (lists.mapValues { $0.filter { active[$0] == nil } }, active)
+}
+@MainActor var gridDebugBlindness: [UInt32: GridDebugBlindness] = [:]
+@MainActor private func gridScheduleDebugBlindRefresh(_ event: RefreshSessionEvent, after delay: TimeInterval) {
+    Task { @MainActor in
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        scheduleCancellableCompleteRefreshSession(event)
+    }
+}
+@MainActor private func gridDebugForgets(_ id: UInt32) -> Bool {
+    guard let state = gridDebugBlindness[id] else { return false }
+    return gridOwnsBackendUI() && state.forget && state.expires > ProcessInfo.processInfo.systemUptime
+}
+
 struct GridLayoutNode: Codable {
     var id: UInt32?
     var pid: Int32?
@@ -53,7 +89,7 @@ struct GridPendingHomePruning {
 }
 
 @MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
-    guard let workspace = window.nodeWorkspace else { return }
+    guard !gridDebugForgets(window.windowId), let workspace = window.nodeWorkspace else { return }
     var floating = window.isFloating
     if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
     gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
@@ -91,7 +127,7 @@ struct GridDeferredNativeWindow {
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 
 @MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
-    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
+    let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
     guard !pending.isEmpty else { return [] }
     let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
     var owners: [UInt32: Int32] = [:]
@@ -197,9 +233,25 @@ private func gridBootIdentity() -> String {
 }
 struct GridLayoutCommand: Command {
     let args: GridLayoutCmdArgs
-    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot"].contains(args.operation.val) }
+    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot", "debug-blind"].contains(args.operation.val) }
     func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
         do {
+            if args.operation.val == "debug-blind" {
+                guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
+                guard let data = args.data else { return .fail(io.err("Expected debug blindness JSON")) }
+                let request = try JSONDecoder().decode(GridDebugBlindRequest.self, from: Data(data.utf8))
+                let now = ProcessInfo.processInfo.systemUptime
+                gridDebugBlindness = try gridUpdatedBlindness(gridDebugBlindness, windowID: request.windowID,
+                    seconds: request.seconds, forget: request.forget, now: now)
+                if gridDebugForgets(request.windowID) { gridForgetRecoveredWindowHome(request.windowID) }
+                // Socket commands run light sessions, which never collect or discover windows. Schedule complete
+                // refreshes so the blindness takes effect now and lifts at expiry even when no other event arrives.
+                gridScheduleDebugBlindRefresh(.socketServer(args), after: 0.1)
+                if request.seconds > 0 { gridScheduleDebugBlindRefresh(.socketServer(args), after: request.seconds + 0.2) }
+                let response = try JSONSerialization.data(withJSONObject: ["windowID": Double(request.windowID),
+                    "seconds": max(0, (gridDebugBlindness[request.windowID]?.expires ?? now) - now)])
+                return .succ(io.out(String(decoding: response, as: UTF8.self)))
+            }
             if args.operation.val == "management-status" { return .succ(io.out(try gridManagementStatus())) }
             if args.operation.val == "status" {
                 guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
@@ -373,6 +425,7 @@ struct GridLayoutCommand: Command {
                let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
         }
         for home in Array(gridPendingWindowHomes.values) {
+            if gridDebugForgets(home.id) { gridForgetRecoveredWindowHome(home.id); continue }
             var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
             let app = NSRunningApplication(processIdentifier: home.pid)
             if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),

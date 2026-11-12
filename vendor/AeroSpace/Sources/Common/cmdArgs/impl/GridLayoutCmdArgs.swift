@@ -5,7 +5,7 @@ public struct GridLayoutCmdArgs: CmdArgs {
     public var data: String? = nil
     public static let parser: CmdParser<Self> = .init(
         kind: .gridLayout,
-        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate)",
+        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate|debug-blind)",
         flags: ["--workspace": workspaceSubArgParser(), "--data": singleValueSubArgParser(\.data, "JSON", { .success($0) })],
         posArgs: [newMandatoryPosArgParser(\.operation, consumeStrCliArg, placeholder: "<operation>")]
     )
