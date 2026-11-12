@@ -15,7 +15,7 @@ python3 -m unittest discover -s Tests/RecoveryTests -v
 python3 -m unittest discover -s Tests/UpdateTests -v
 ```
 
-The backend source is vendored directly, including AeroGrid modifications. A normal clone needs no submodule initialization. `scripts/aerospace-grid.patch` records changes against the pinned AeroSpace revision in [UPSTREAM.md](UPSTREAM.md).
+The backend source is vendored directly, including AeroGrid modifications. A normal clone needs no submodule initialization. `scripts/aerospace-grid.patch` records changes against the pinned AeroSpace revision in [UPSTREAM.md](UPSTREAM.md). After changing `vendor/AeroSpace/Sources`, regenerate it with `zsh scripts/regenerate-backend-patch.sh` (clones the pinned revision into a temporary directory; the output is byte-identical when nothing changed).
 
 Root tests exercise the core model, layout/navigation behavior, organization transactions, lifecycle policy, and gesture packet recognition. Backend tests cover the window engine and its extensions. Installer tests run against temporary homes with external system calls mocked; they need the release products from the build step.
 
