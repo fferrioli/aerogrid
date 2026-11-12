@@ -2,7 +2,7 @@
 
 **Objetivo.** Una ventana en fullscreen nativo que sigue abierta conserva el mismo casillero (mismo ID, misma posición) a través de bloqueos, pantalla apagada y horas de inactividad, sin pasar por el Dock.
 
-**Un PR.** Rama base: la del plan, o `main` si el plan ya está mergeado. Causa raíz y evidencia: [`diagnostico.md`](diagnostico.md).
+**Un PR.** Rama base: `t3/fullscreen-grid-position-analysis` (PR #3, el plan), o `main` si ya está mergeado. Causa raíz y evidencia: [`diagnostico.md`](diagnostico.md).
 
 ## Estrategia: tres defensas independientes
 

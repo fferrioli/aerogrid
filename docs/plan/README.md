@@ -97,6 +97,6 @@ Vas a ejecutar la Fase 0 del plan de AeroGrid. Leé docs/plan/README.md y docs/p
 (diagnostico.md una vez, como contexto). Seguí el protocolo por paquete: vos diseñás, verificás, integrás
 y hacés la aceptación; la lógica especificada y la revisión de bugs las delegás a subagentes Sol 6.1,
 pasándoles las Reglas comunes más la ficha completa del paquete. Empezá por F0-1, que necesita que yo
-bloquee la Mac: avisame cuando la sonda esté lista. Trabajá sobre la rama del plan (o main si ya está
+bloquee la Mac: avisame cuando la sonda esté lista. Trabajá sobre la rama t3/fullscreen-grid-position-analysis (o main si ya está
 mergeada). Una sola instalación, al final, y avisame antes de cerrar las apps.
 ```
