@@ -4,7 +4,7 @@
 
 **Requisito.** Fase 0 mergeada y con la prueba de una noche superada.
 
-A diferencia de la Fase 0, acá hay diseño por resolver. Cada bloque empieza con un **paquete de diseño `[ORQ]`** que termina en una nota de decisión (`docs/plan/decisiones/F1-n.md`, una página: opciones, elegida, por qué, modelo de datos, casos de borde) y en las fichas de implementación para subagentes, con el mismo formato que las de la Fase 0 (archivos, especificación, tests, verificación). El orquestador no delega implementación hasta que la nota existe.
+A diferencia de la Fase 0, acá hay diseño por resolver. Cada bloque empieza con una **tarea de diseño `[ORQ]`** que termina en una nota de decisión (`docs/plan/decisiones/F1-n.md`, una página: opciones, elegida, por qué, modelo de datos, casos de borde) y en las fichas de implementación para subagentes, con el mismo formato que las de la Fase 0 (archivos, especificación, tests, verificación). El orquestador no delega implementación hasta que la nota existe.
 
 Referencia visual: [`demo/proposals/ux-propuesta.html`](../../demo/proposals/ux-propuesta.html), escenas 1 (estado «en reposo»), 2 (el setup vuelve) y 5 (avisos con deshacer).
 
@@ -101,4 +101,4 @@ Depende de F1-1 (misma plantilla).
 
 ## F1-7 · Extraer el reconciliador `[SUB-impl]`, oportunista
 
-Al tocar `DynamicEngine` en F1-1 y F1-3, mover sin cambiar comportamiento la reconciliación de fullscreen y la de topología a archivos propios (extensiones o tipos colaboradores). Un commit de solo movimiento, con la suite en verde antes y después. No es un objetivo en sí: si no simplifica el paquete en curso, no se hace.
+Al tocar `DynamicEngine` en F1-1 y F1-3, mover sin cambiar comportamiento la reconciliación de fullscreen y la de topología a archivos propios (extensiones o tipos colaboradores). Un commit de solo movimiento, con la suite en verde antes y después. No es un objetivo en sí: si no simplifica la tarea en curso, no se hace.

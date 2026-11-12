@@ -25,7 +25,7 @@ AeroGrid trata «ahora no puedo observar esta ventana» como «se cerró» (o «
 | Una de esas transiciones conserva el ID del casillero pero cambia `homeID` a sí mismo y pone `manuallyEdited` en falso: es exactamente el resultado del segundo modo de falla. | Observado |
 | Registro de energía con periodos de pantalla apagada de varias horas. | Observado |
 | Los dos modos de falla reproducidos en el motor con tests temporales sobre `MapBackend`. | Simulado |
-| Que el backend pierde las ventanas al bloquear. | Leído en el código (lo describe el comentario de `closedWindowsCache.swift`); **no observado en vivo**. El paquete F0-1 lo confirma. |
+| Que el backend pierde las ventanas al bloquear. | Leído en el código (lo describe el comentario de `closedWindowsCache.swift`); **no observado en vivo**. La tarea F0-1 lo registra durante el uso normal; el arreglo no depende de esa confirmación. |
 
 El arreglo anterior («Recover background fullscreen windows before AX discovery») cubre el reinicio del backend (`backendSession` distinto → `recoverWindowHomes`). El bloqueo no cambia la sesión, así que no se dispara.
 

@@ -4,7 +4,7 @@
 
 **Requisito.** Fase 1 cerrada (en particular F1-0, firma estable, y F1-4 etapa 1).
 
-Mismo método que la Fase 1: cada bloque arranca con un paquete de diseño `[ORQ]` que deja una nota de decisión y las fichas para subagentes. Las vistas, los textos y las animaciones son del orquestador; la lógica pura y la integración con el sistema, de los subagentes.
+Mismo método que la Fase 1: cada bloque arranca con una tarea de diseño `[ORQ]` que deja una nota de decisión y las fichas para subagentes. Las vistas, los textos y las animaciones son del orquestador; la lógica pura y la integración con el sistema, de los subagentes.
 
 Referencia visual: [`demo/proposals/ux-propuesta.html`](../../demo/proposals/ux-propuesta.html), escenas 3, 4 y 5.
 
@@ -35,7 +35,7 @@ Referencia visual: [`demo/proposals/ux-propuesta.html`](../../demo/proposals/ux-
 - ¿El organizador puede abrirse y recibir el soltado mientras otra app tiene el arrastre? Hoy `WindowDragSurface` solo maneja arrastres internos.
 - ¿Qué hace el tiling de AeroSpace con la ventana mientras se la arrastra?
 
-Si alguna respuesta es «no se puede sin APIs nuevas», parar y consultar: es el paquete con más riesgo técnico de la fase.
+Si alguna respuesta es «no se puede sin APIs nuevas», parar y consultar: es la tarea con más riesgo técnico de la fase.
 
 **Diseño `[ORQ]`.** Zona de activación (la misma del hover actual, bajo la cámara) solo durante un arrastre; destinos: centro = apilar, borde = dividir, `+` = espacio nuevo (mismas reglas que `SpaceDrop`); cancelación al soltar fuera.
 
