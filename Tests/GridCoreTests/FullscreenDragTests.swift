@@ -11,6 +11,7 @@ extension DynamicEngineTests {
         return try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
     }
 
+    private func settle(_ n: Int = 3) throws { for _ in 0..<n { try engine.refresh() } }
     func testFullscreenCardMovesToEmptySpaceWithoutMovingOtherAppsAndUndoRestoresIt() throws {
         let full = try enterFullscreen()
         let emptyID = try engine.createSpace(nearID:full.id,displayID:ultra.id)
@@ -102,7 +103,7 @@ extension DynamicEngineTests {
         let destination = try XCTUnwrap(engine.map.spaces.first { $0.id == id })
         backend.screen.windows?[0].nativeFullscreen = false
         backend.screen.nativeVisible = [:]
-        try engine.refresh()
+        try settle()
         let normal = try XCTUnwrap(engine.map.spaces.first { $0.id == id })
         XCTAssertNil(normal.nativeWindow)
         XCTAssertEqual(normal.rect,destination.rect)
@@ -119,7 +120,7 @@ extension DynamicEngineTests {
         try engine.moveWindow(XCTUnwrap(full.nativeWindow),to:empty)
         backend.screen.windows?[0].nativeFullscreen = false
         backend.screen.nativeVisible = [:]
-        try engine.refresh()
+        try settle()
         XCTAssertEqual(engine.map.spaces.first { $0.id == full.id }?.rect,rect)
         XCTAssertEqual(backend.screen.windows?.first?.workspace,external.workspace)
         XCTAssertNil(engine.map.spaces.first { $0.id == full.id }?.nativeWindow)

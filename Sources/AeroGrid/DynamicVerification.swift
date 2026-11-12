@@ -77,7 +77,7 @@ enum DynamicVerification {
         _ = try real.run(["macos-native-fullscreen", "--window-id", String(fixtures[0].id)])
         Thread.sleep(forTimeInterval: 1.5)
         try settleNative(false)
-        try engine.refresh()
+        for _ in 0..<DynamicEngine.exitConfirmations { try engine.refresh() } // An exit is confirmed over consecutive samples.
         try require(engine.map.fullscreens.isEmpty, "PASS: fullscreen exit removes its temporary destination")
         try record("Layout after fullscreen: \(try real.snapshot(workspace: source.workspace))")
         } else { try record("SKIP: native switching, previously rejected by macOS; not certified by this run") }

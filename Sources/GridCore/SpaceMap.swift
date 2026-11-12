@@ -125,6 +125,11 @@ public struct FullscreenLink: Codable, Equatable {
     public var manuallyEdited: Bool = false
     public var homeEdited: Bool? = nil
 }
+public struct FullscreenPlace: Codable, Equatable {
+    public var space: Space
+    public var manuallyEdited: Bool
+    public var removedAt: Date
+}
 public struct MapCheckpoint: Codable, Equatable {
     public var spaces: [Space]
     public var families: [SplitFamily]
@@ -150,6 +155,7 @@ public struct SpaceMap: Codable, Equatable {
     public var anchors: [String: NavigationAnchor]? = nil
     public var families: [SplitFamily] = []
     public var fullscreens: [FullscreenLink] = []
+    public var fullscreenPlaces: [FullscreenPlace]? = nil
     public var layouts: [String: String] = [:]
     public var undo: [OrganizationUndo] = []
     public var pending: PendingOrganization?
@@ -203,6 +209,10 @@ public struct SpaceMap: Codable, Equatable {
         return (space.row + 10001, space.column)
     }
     public func validate() throws {
+        let places = fullscreenPlaces ?? []
+        guard places.allSatisfy({ $0.space.nativeWindow != nil && $0.space.rect.isValid && ($0.space.foldedRect?.isValid ?? true) }),
+              Set(places.compactMap { $0.space.nativeWindow }).count == places.count else { throw GridError.invalid("Invalid fullscreen places") }
+
         guard [2,3].contains(version), !spaces.isEmpty, spaces.count <= 4096, Set(spaces.map(\.id)).count == spaces.count,
               Set(spaces.filter { !$0.isDormant }.map { version == 2 ? "\($0.row):\($0.column)" : "\($0.board):\($0.row):\($0.column)" }).count == spaces.filter({ !$0.isDormant }).count else { throw GridError.invalid("Invalid dynamic map") }
         guard spaces.allSatisfy({ $0.rect.isValid && ($0.foldedRect?.isValid ?? true) }) else { throw GridError.invalid("Invalid space bounds") }
