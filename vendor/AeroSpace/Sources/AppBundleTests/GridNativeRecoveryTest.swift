@@ -2,6 +2,33 @@
 import XCTest
 
 final class GridNativeRecoveryTest: XCTestCase {
+    func testRetentionDecision() {
+        XCTAssertTrue(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: true))
+        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: false, explicitClose: false, terminated: false, owned: true))
+        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: true, terminated: false, owned: true))
+        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: true, owned: true))
+        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: false))
+    }
+
+    func testPendingHomePruning() {
+        var policy = GridPendingHomePruning()
+        func sample(_ now: Double, alive: Bool = true, boot: Bool = true, owner: Bool = false, locked: Bool = false) -> Bool {
+            policy.shouldDiscard(processAlive: alive, sameBoot: boot, ownerMatches: owner, locked: locked, now: now)
+        }
+        XCTAssertTrue(sample(0, alive: false))
+        XCTAssertTrue(sample(0, boot: false))
+        XCTAssertFalse(sample(0))
+        XCTAssertFalse(sample(9))
+        XCTAssertTrue(sample(10))
+        XCTAssertFalse(sample(11, locked: true))
+        XCTAssertFalse(sample(100, locked: true))
+        XCTAssertFalse(sample(101))
+        XCTAssertFalse(sample(110))
+        XCTAssertTrue(sample(111))
+        XCTAssertFalse(sample(112, owner: true))
+        XCTAssertFalse(sample(120))
+    }
+
     func testDeferredWindowNeedsCurrentBootMatchingOwnerAndNativeDisplay() {
         let home = GridWindowHome(id: 99, pid: 4, boot: "current", workspace: "editor", floating: false)
         let valid = GridNativeRecoveryEvidence(boot: "current", owners: [99: 4], monitors: [99: 2])

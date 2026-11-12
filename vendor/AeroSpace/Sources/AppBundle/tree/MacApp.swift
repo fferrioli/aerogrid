@@ -274,11 +274,12 @@ final class MacApp: AbstractApp {
                 await app.destroy()
             }
         }
+        let sessionLocked = gridOwnsBackendUI() && gridSessionIsLocked()
         return try await withThrowingTaskGroup(of: (pid_t, [UInt32]).self, returning: [MacApp: [UInt32]].self) { group in
             func refreshTheApp(_ nsApp: NSRunningApplication) {
                 group.addTask { @Sendable @MainActor in
                     guard let app = try await MacApp.getOrRegister(nsApp) else { return (nsApp.processIdentifier, []) }
-                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId))
+                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId, sessionLocked: sessionLocked))
                 }
             }
             // Register new apps
@@ -307,7 +308,7 @@ final class MacApp: AbstractApp {
         }
     }
 
-    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?) async throws -> [UInt32] {
+    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?, sessionLocked: Bool) async throws -> [UInt32] {
         if nsApp.isTerminated {
             await destroy()
             return []
@@ -318,7 +319,7 @@ final class MacApp: AbstractApp {
             var dead = [UInt32: AxWindow]()
             // Second line of defence against lock screen. See the first line of defence: closedWindowsCache
             // Second and third lines of defence are technically needed only to avoid potential flickering
-            if frontmostAppBundleId != lockScreenAppBundleId {
+            if frontmostAppBundleId != lockScreenAppBundleId && !sessionLocked {
                 (alive, dead) = try alive.partition {
                     try job.checkCancellation()
                     return $0.value.ax.containingWindowId() != nil

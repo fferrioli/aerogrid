@@ -90,7 +90,12 @@ final class MacWindow: Window {
             return
         }
         if !skipClosedWindowsCache { cacheClosedWindowIfNeeded() }
-        gridForgetRecoveredWindowHome(windowId)
+        if gridShouldRetainFullscreenHome(fullscreen: parent is MacosFullscreenWindowsContainer,
+            explicitClose: skipClosedWindowsCache, terminated: macApp.nsApp.isTerminated, owned: gridOwnsBackendUI()) {
+            gridRetainFullscreenHome(self)
+        } else {
+            gridForgetRecoveredWindowHome(windowId)
+        }
         let parent = unbindFromParent().parent
         let deadWindowWorkspace = parent.nodeWorkspace
         let focus = focus

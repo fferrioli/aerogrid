@@ -154,10 +154,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..3780670
+index 0000000..dc26c14
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,537 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -191,6 +191,37 @@ index 0000000..3780670
 +    var floating: Bool
 +}
 +
++func gridShouldRetainFullscreenHome(fullscreen: Bool, explicitClose: Bool, terminated: Bool, owned: Bool) -> Bool {
++    owned && fullscreen && !explicitClose && !terminated
++}
++
++struct GridPendingHomePruning {
++    var absentSince: TimeInterval?
++
++    mutating func shouldDiscard(processAlive: Bool, sameBoot: Bool, ownerMatches: Bool, locked: Bool, now: TimeInterval) -> Bool {
++        guard processAlive && sameBoot else { return true }
++        // A locked sample breaks the continuous unlocked observation interval.
++        guard !locked && !ownerMatches else { absentSince = nil; return false }
++        if absentSince == nil { absentSince = now }
++        return now - (absentSince ?? now) >= 10
++    }
++}
++
++@MainActor func gridSessionIsLocked() -> Bool {
++    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
++    return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
++}
++
++@MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
++    guard let workspace = window.nodeWorkspace else { return }
++    var floating = window.isFloating
++    if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
++    gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
++        boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
++    gridPendingHomePruning.removeValue(forKey: window.windowId)
++    gridMinimumWidthTracker.forget(windowID: window.windowId)
++}
++
 +struct GridNativeRecoveryEvidence {
 +    var boot: String
 +    var owners: [UInt32: Int32]
@@ -216,6 +247,7 @@ index 0000000..3780670
 +        home.workspace == workspace && self.monitor == monitor
 +    }
 +}
++@MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 +@MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 +
 +@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
@@ -271,6 +303,7 @@ index 0000000..3780670
 +
 +@MainActor func gridForgetRecoveredWindowHome(_ id: UInt32) {
 +    gridPendingWindowHomes.removeValue(forKey: id)
++    gridPendingHomePruning.removeValue(forKey: id)
 +    gridMinimumWidthTracker.forget(windowID: id)
 +}
 +
@@ -491,11 +524,23 @@ index 0000000..3780670
 +            }
 +        }
 +        var homeByID = Dictionary(uniqueKeysWithValues: actualHomes.map { ($0.id, $0) })
-+        for home in gridPendingWindowHomes.values where home.boot == boot {
-+            guard isUnitTest || NSRunningApplication(processIdentifier: home.pid) != nil else {
++        let locked = gridSessionIsLocked()
++        let now = ProcessInfo.processInfo.systemUptime
++        let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
++        var owners: [UInt32: Int32] = [:]
++        for entry in entries {
++            if let id = entry[kCGWindowNumber as String] as? NSNumber,
++               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
++        }
++        for home in Array(gridPendingWindowHomes.values) {
++            var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
++            let app = NSRunningApplication(processIdentifier: home.pid)
++            if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
++                sameBoot: home.boot == boot, ownerMatches: owners[home.id] == home.pid, locked: locked, now: now) {
 +                gridForgetRecoveredWindowHome(home.id)
 +                continue
 +            }
++            gridPendingHomePruning[home.id] = policy
 +            homeByID[home.id] = home
 +        }
 +        let homes = try JSONSerialization.jsonObject(with: JSONEncoder().encode(homeByID.keys.sorted().compactMap { homeByID[$0] }))
@@ -1083,7 +1128,7 @@ index fc7bed7..0e1f297 100644
              await answerToClient(
                  exitCode: EXIT_CODE_TWO,
 diff --git a/Sources/AppBundle/tree/MacApp.swift b/Sources/AppBundle/tree/MacApp.swift
-index 94abdf7..03bf874 100644
+index 94abdf7..2ee8adc 100644
 --- a/Sources/AppBundle/tree/MacApp.swift
 +++ b/Sources/AppBundle/tree/MacApp.swift
 @@ -49,6 +49,8 @@ final class MacApp: AbstractApp {
@@ -1110,8 +1155,40 @@ index 94abdf7..03bf874 100644
      // todo merge together with detectNewWindows
      func getFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
          let windowId = try await thread?.runInLoop(cm) { [nsApp, axApp, windows] job in
+@@ -264,11 +274,12 @@ final class MacApp: AbstractApp {
+                 await app.destroy()
+             }
+         }
++        let sessionLocked = gridOwnsBackendUI() && gridSessionIsLocked()
+         return try await withThrowingTaskGroup(of: (pid_t, [UInt32]).self, returning: [MacApp: [UInt32]].self) { group in
+             func refreshTheApp(_ nsApp: NSRunningApplication) {
+                 group.addTask { @Sendable @MainActor in
+                     guard let app = try await MacApp.getOrRegister(nsApp) else { return (nsApp.processIdentifier, []) }
+-                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId))
++                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId, sessionLocked: sessionLocked))
+                 }
+             }
+             // Register new apps
+@@ -297,7 +308,7 @@ final class MacApp: AbstractApp {
+         }
+     }
+ 
+-    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?) async throws -> [UInt32] {
++    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?, sessionLocked: Bool) async throws -> [UInt32] {
+         if nsApp.isTerminated {
+             await destroy()
+             return []
+@@ -308,7 +319,7 @@ final class MacApp: AbstractApp {
+             var dead = [UInt32: AxWindow]()
+             // Second line of defence against lock screen. See the first line of defence: closedWindowsCache
+             // Second and third lines of defence are technically needed only to avoid potential flickering
+-            if frontmostAppBundleId != lockScreenAppBundleId {
++            if frontmostAppBundleId != lockScreenAppBundleId && !sessionLocked {
+                 (alive, dead) = try alive.partition {
+                     try job.checkCancellation()
+                     return $0.value.ax.containingWindowId() != nil
 diff --git a/Sources/AppBundle/tree/MacWindow.swift b/Sources/AppBundle/tree/MacWindow.swift
-index 94143ef..db594d4 100644
+index 94143ef..0878c90 100644
 --- a/Sources/AppBundle/tree/MacWindow.swift
 +++ b/Sources/AppBundle/tree/MacWindow.swift
 @@ -1,6 +1,14 @@
@@ -1129,7 +1206,7 @@ index 94143ef..db594d4 100644
  final class MacWindow: Window {
      let macApp: MacApp
      private var prevUnhiddenProportionalPositionInsideWorkspaceRect: CGPoint?
-@@ -77,15 +85,17 @@ final class MacWindow: Window {
+@@ -77,15 +85,22 @@ final class MacWindow: Window {
      //                        If you are unsure, it's better to pass `false`
      @MainActor
      func garbageCollect(skipClosedWindowsCache: Bool) {
@@ -1138,7 +1215,12 @@ index 94143ef..db594d4 100644
              return
          }
          if !skipClosedWindowsCache { cacheClosedWindowIfNeeded() }
-+        gridForgetRecoveredWindowHome(windowId)
++        if gridShouldRetainFullscreenHome(fullscreen: parent is MacosFullscreenWindowsContainer,
++            explicitClose: skipClosedWindowsCache, terminated: macApp.nsApp.isTerminated, owned: gridOwnsBackendUI()) {
++            gridRetainFullscreenHome(self)
++        } else {
++            gridForgetRecoveredWindowHome(windowId)
++        }
          let parent = unbindFromParent().parent
          let deadWindowWorkspace = parent.nodeWorkspace
          let focus = focus
@@ -1148,7 +1230,7 @@ index 94143ef..db594d4 100644
          {
              switch parent.cases {
                  case .tilingContainer, .floatingWindowsContainer, .macosHiddenAppsWindowsContainer, .macosFullscreenWindowsContainer:
-@@ -103,6 +113,10 @@ final class MacWindow: Window {
+@@ -103,6 +118,10 @@ final class MacWindow: Window {
                      break
              }
          }
@@ -1159,7 +1241,7 @@ index 94143ef..db594d4 100644
      }
  
      override func getTitle(_ cm: CancellationMode) async throws -> String { try await macApp.getAxTitle(windowId, cm) ?? "" }
-@@ -164,17 +178,9 @@ final class MacWindow: Window {
+@@ -164,17 +183,9 @@ final class MacWindow: Window {
              // Just a small optimization to avoid unnecessary AX calls for non floating windows
              // Tiling windows should be unhidden with layoutRecursive anyway
              case .floatingWindow:
@@ -1180,7 +1262,7 @@ index 94143ef..db594d4 100644
              case .macosNativeFullscreenWindow, .macosNativeHiddenAppWindow, .macosNativeMinimizedWindow,
                   .macosPopupWindow, .tiling, .rootTilingContainer, .shimContainerRelation: break
          }
-@@ -197,6 +203,14 @@ final class MacWindow: Window {
+@@ -197,6 +208,14 @@ final class MacWindow: Window {
      override func getAxRect(_ cm: CancellationMode) async throws -> Rect? {
          try await macApp.getAxRect(windowId, cm)
      }
@@ -1195,7 +1277,7 @@ index 94143ef..db594d4 100644
  }
  
  extension Window {
-@@ -247,17 +261,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
+@@ -247,17 +266,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
               .macosFullscreenWindowsContainer, .macosHiddenAppsWindowsContainer:
              let layout = global_layoutForNextDetectedWindow
              global_layoutForNextDetectedWindow = nil
@@ -1511,14 +1593,41 @@ index 0000000..ac1db6e
 +}
 diff --git a/Sources/AppBundleTests/GridNativeRecoveryTest.swift b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
 new file mode 100644
-index 0000000..42a3544
+index 0000000..68df680
 --- /dev/null
 +++ b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,57 @@
 +@testable import AppBundle
 +import XCTest
 +
 +final class GridNativeRecoveryTest: XCTestCase {
++    func testRetentionDecision() {
++        XCTAssertTrue(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: false, explicitClose: false, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: true, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: true, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: false))
++    }
++
++    func testPendingHomePruning() {
++        var policy = GridPendingHomePruning()
++        func sample(_ now: Double, alive: Bool = true, boot: Bool = true, owner: Bool = false, locked: Bool = false) -> Bool {
++            policy.shouldDiscard(processAlive: alive, sameBoot: boot, ownerMatches: owner, locked: locked, now: now)
++        }
++        XCTAssertTrue(sample(0, alive: false))
++        XCTAssertTrue(sample(0, boot: false))
++        XCTAssertFalse(sample(0))
++        XCTAssertFalse(sample(9))
++        XCTAssertTrue(sample(10))
++        XCTAssertFalse(sample(11, locked: true))
++        XCTAssertFalse(sample(100, locked: true))
++        XCTAssertFalse(sample(101))
++        XCTAssertFalse(sample(110))
++        XCTAssertTrue(sample(111))
++        XCTAssertFalse(sample(112, owner: true))
++        XCTAssertFalse(sample(120))
++    }
++
 +    func testDeferredWindowNeedsCurrentBootMatchingOwnerAndNativeDisplay() {
 +        let home = GridWindowHome(id: 99, pid: 4, boot: "current", workspace: "editor", floating: false)
 +        let valid = GridNativeRecoveryEvidence(boot: "current", owners: [99: 4], monitors: [99: 2])

@@ -31,6 +31,37 @@ struct GridWindowHome: Codable {
     var floating: Bool
 }
 
+func gridShouldRetainFullscreenHome(fullscreen: Bool, explicitClose: Bool, terminated: Bool, owned: Bool) -> Bool {
+    owned && fullscreen && !explicitClose && !terminated
+}
+
+struct GridPendingHomePruning {
+    var absentSince: TimeInterval?
+
+    mutating func shouldDiscard(processAlive: Bool, sameBoot: Bool, ownerMatches: Bool, locked: Bool, now: TimeInterval) -> Bool {
+        guard processAlive && sameBoot else { return true }
+        // A locked sample breaks the continuous unlocked observation interval.
+        guard !locked && !ownerMatches else { absentSince = nil; return false }
+        if absentSince == nil { absentSince = now }
+        return now - (absentSince ?? now) >= 10
+    }
+}
+
+@MainActor func gridSessionIsLocked() -> Bool {
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+    return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
+}
+
+@MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
+    guard let workspace = window.nodeWorkspace else { return }
+    var floating = window.isFloating
+    if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
+    gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
+        boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
+    gridPendingHomePruning.removeValue(forKey: window.windowId)
+    gridMinimumWidthTracker.forget(windowID: window.windowId)
+}
+
 struct GridNativeRecoveryEvidence {
     var boot: String
     var owners: [UInt32: Int32]
@@ -56,6 +87,7 @@ struct GridDeferredNativeWindow {
         home.workspace == workspace && self.monitor == monitor
     }
 }
+@MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 
 @MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
@@ -111,6 +143,7 @@ struct GridMinimumWidthTracker {
 
 @MainActor func gridForgetRecoveredWindowHome(_ id: UInt32) {
     gridPendingWindowHomes.removeValue(forKey: id)
+    gridPendingHomePruning.removeValue(forKey: id)
     gridMinimumWidthTracker.forget(windowID: id)
 }
 
@@ -331,11 +364,23 @@ struct GridLayoutCommand: Command {
             }
         }
         var homeByID = Dictionary(uniqueKeysWithValues: actualHomes.map { ($0.id, $0) })
-        for home in gridPendingWindowHomes.values where home.boot == boot {
-            guard isUnitTest || NSRunningApplication(processIdentifier: home.pid) != nil else {
+        let locked = gridSessionIsLocked()
+        let now = ProcessInfo.processInfo.systemUptime
+        let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        var owners: [UInt32: Int32] = [:]
+        for entry in entries {
+            if let id = entry[kCGWindowNumber as String] as? NSNumber,
+               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
+        }
+        for home in Array(gridPendingWindowHomes.values) {
+            var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
+            let app = NSRunningApplication(processIdentifier: home.pid)
+            if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
+                sameBoot: home.boot == boot, ownerMatches: owners[home.id] == home.pid, locked: locked, now: now) {
                 gridForgetRecoveredWindowHome(home.id)
                 continue
             }
+            gridPendingHomePruning[home.id] = policy
             homeByID[home.id] = home
         }
         let homes = try JSONSerialization.jsonObject(with: JSONEncoder().encode(homeByID.keys.sorted().compactMap { homeByID[$0] }))
