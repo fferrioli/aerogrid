@@ -80,7 +80,7 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 
 | Tarea | Rol | Estado | PR | Fecha |
 |---|---|---|---|---|
-| F0-1 Registro pasivo del caso real (no bloquea) | SUB-impl + HUM | en curso | | |
+| F0-1 Registro pasivo del caso real (no bloquea) | SUB-impl + HUM | hecho (sonda); registro pendiente | | 2026-11-12 |
 | F0-2 Compuerta de reconciliación | SUB-impl | hecho | | 2026-11-12 |
 | F0-3 Reconciliación fullscreen con confianza | SUB-impl | en curso | | |
 | F0-4 Conectar compuerta y registro en la app | SUB-impl | pendiente | | |
