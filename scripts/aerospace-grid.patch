@@ -1082,7 +1082,7 @@ index 5e10321..d857ec4 100644
  
          await refreshModel_nonCancellable()
 diff --git a/Sources/AppBundle/normalizeLayoutReason.swift b/Sources/AppBundle/normalizeLayoutReason.swift
-index 3069eff..4bc215d 100644
+index 3069eff..e3e1306 100644
 --- a/Sources/AppBundle/normalizeLayoutReason.swift
 +++ b/Sources/AppBundle/normalizeLayoutReason.swift
 @@ -6,6 +6,9 @@ func normalizeLayoutReason() async throws {
@@ -1095,7 +1095,21 @@ index 3069eff..4bc215d 100644
  }
  
  @MainActor
-@@ -32,6 +35,7 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
+@@ -21,7 +24,12 @@ private func validateStillPopups() async throws {
+ }
+ 
+ @MainActor
+-private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) async throws {
++func _normalizeLayoutReason(
++    workspace: Workspace,
++    windows: [Window],
++    ownsBackendUI: Bool = gridOwnsBackendUI(),
++    corroborateFullscreen: @MainActor (UInt32) -> Bool = { gridNativeMonitor(windowID: $0) != nil },
++) async throws {
+     for window in windows {
+         let isMacosFullscreen = try await window.isMacosFullscreen(.cancellable)
+         let isMacosMinimized = try await (!isMacosFullscreen).andAsync { @MainActor @Sendable in try await window.isMacosMinimized(.cancellable) }
+@@ -32,6 +40,7 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
                  guard let parent = window.parent else { continue }
                  switch true {
                      case isMacosFullscreen:
@@ -1103,7 +1117,19 @@ index 3069eff..4bc215d 100644
                          window.layoutReason = .macos(prevParentKind: parent.kind)
                          window.bind(to: workspace.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
                      case isMacosMinimized:
-@@ -70,4 +74,5 @@ func exitMacOsNativeUnconventionalState(
+@@ -44,6 +53,11 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
+                 }
+             case .macos(let prevParentKind):
+                 if !isMacosFullscreen && !isMacosMinimized && !isMacosWindowOfHiddenApp {
++                    if ownsBackendUI,
++                       window.parent is MacosFullscreenWindowsContainer,
++                       corroborateFullscreen(window.windowId) {
++                        continue
++                    }
+                     try await exitMacOsNativeUnconventionalState(window: window, prevParentKind: prevParentKind, workspace: workspace, .cancellable)
+                 }
+         }
+@@ -70,4 +84,5 @@ func exitMacOsNativeUnconventionalState(
          case .macosMinimizedWindowsContainer, .macosFullscreenWindowsContainer, .macosHiddenAppsWindowsContainer: // wtf case, should never be possible. But If encounter it, let's just re-layout window
              try await window.relayoutWindow(on: workspace, cm)
      }
@@ -1589,6 +1615,61 @@ index 0000000..ac1db6e
 +        }, inputCounters: { [] })
 +        try await updateFocusCache(fallback)
 +        XCTAssertTrue(focus.windowOrNil === chosen)
++    }
++}
+diff --git a/Sources/AppBundleTests/GridFullscreenExitTest.swift b/Sources/AppBundleTests/GridFullscreenExitTest.swift
+new file mode 100644
+index 0000000..e8d8716
+--- /dev/null
++++ b/Sources/AppBundleTests/GridFullscreenExitTest.swift
+@@ -0,0 +1,49 @@
++@testable import AppBundle
++import XCTest
++
++@MainActor
++final class GridFullscreenExitTest: XCTestCase {
++    override func setUp() async throws { setUpWorkspacesForTests() }
++
++    private func checkExit(bundleIdentifier: String, corroborated: Bool, remains: Bool) async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        window.isMacosFullscreenForTest = false
++        var queries = 0
++        try await _normalizeLayoutReason(
++            workspace: workspace, windows: [window],
++            ownsBackendUI: gridOwnsBackendUI(bundleIdentifier: bundleIdentifier),
++            corroborateFullscreen: { id in
++                XCTAssertEqual(id, window.windowId)
++                queries += 1
++                return corroborated
++            }
++        )
++        XCTAssertEqual(window.parent is MacosFullscreenWindowsContainer, remains)
++        if remains {
++            guard case .macos(prevParentKind: .floatingWindowsContainer) = window.layoutReason else {
++                return XCTFail("Fullscreen layout reason changed")
++            }
++        } else {
++            guard case .standard = window.layoutReason else { return XCTFail("Window did not exit") }
++            XCTAssertTrue(window.parent === workspace.floatingWindowsContainer)
++        }
++        XCTAssertEqual(queries, bundleIdentifier == "local.AeroGrid.Backend" ? 1 : 0)
++    }
++
++    func testFalseAXReadingRetainsCorroboratedFullscreen() async throws {
++        try await checkExit(bundleIdentifier: "local.AeroGrid.Backend", corroborated: true, remains: true)
++    }
++
++    func testFalseAXReadingExitsWithoutCorroboration() async throws {
++        try await checkExit(bundleIdentifier: "local.AeroGrid.Backend", corroborated: false, remains: false)
++    }
++
++    func testStandaloneIgnoresCorroboration() async throws {
++        try await checkExit(bundleIdentifier: "bobko.aerospace", corroborated: true, remains: false)
 +    }
 +}
 diff --git a/Sources/AppBundleTests/GridNativeRecoveryTest.swift b/Sources/AppBundleTests/GridNativeRecoveryTest.swift

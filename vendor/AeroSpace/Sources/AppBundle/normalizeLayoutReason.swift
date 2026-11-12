@@ -24,7 +24,12 @@ private func validateStillPopups() async throws {
 }
 
 @MainActor
-private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) async throws {
+func _normalizeLayoutReason(
+    workspace: Workspace,
+    windows: [Window],
+    ownsBackendUI: Bool = gridOwnsBackendUI(),
+    corroborateFullscreen: @MainActor (UInt32) -> Bool = { gridNativeMonitor(windowID: $0) != nil },
+) async throws {
     for window in windows {
         let isMacosFullscreen = try await window.isMacosFullscreen(.cancellable)
         let isMacosMinimized = try await (!isMacosFullscreen).andAsync { @MainActor @Sendable in try await window.isMacosMinimized(.cancellable) }
@@ -48,6 +53,11 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
                 }
             case .macos(let prevParentKind):
                 if !isMacosFullscreen && !isMacosMinimized && !isMacosWindowOfHiddenApp {
+                    if ownsBackendUI,
+                       window.parent is MacosFullscreenWindowsContainer,
+                       corroborateFullscreen(window.windowId) {
+                        continue
+                    }
                     try await exitMacOsNativeUnconventionalState(window: window, prevParentKind: prevParentKind, workspace: workspace, .cancellable)
                 }
         }

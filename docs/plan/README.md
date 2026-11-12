@@ -85,8 +85,8 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-3 Reconciliación fullscreen con confianza | SUB-impl | hecho | | 2026-11-12 |
 | F0-4 Conectar compuerta y registro en la app | SUB-impl | en curso | | |
 | F0-5 Backend: retener ventanas fullscreen | SUB-impl | hecho | | 2026-11-12 |
-| F0-6 Backend: salida de fullscreen corroborada | SUB-impl | en curso | | |
-| F0-7 Backend: inyección de falla en vivo | SUB-impl | pendiente | | |
+| F0-6 Backend: salida de fullscreen corroborada | SUB-impl | hecho | | 2026-11-12 |
+| F0-7 Backend: inyección de falla en vivo | SUB-impl | en curso | | |
 | F0-8 Revisión independiente | SUB-rev | pendiente | | |
 | F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | pendiente | | |
 | F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
