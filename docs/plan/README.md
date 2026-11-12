@@ -1,0 +1,102 @@
+# Plan de trabajo de AeroGrid
+
+Este directorio es el plan ejecutable para llevar AeroGrid de un puntaje de UX/UI de 5,1 a 8,3. Está escrito para que lo siga un agente orquestador que delega paquetes cerrados a subagentes, gastando el mínimo de contexto.
+
+| Archivo | Para qué | Quién lo lee |
+|---|---|---|
+| `README.md` (este) | Roles, reglas, protocolo por paquete, tablero de estado | Orquestador, siempre |
+| [`diagnostico.md`](diagnostico.md) | Causa raíz del bug de fullscreen, hallazgos de arquitectura, puntajes | Orquestador, una vez |
+| [`fase-0-fullscreen.md`](fase-0-fullscreen.md) | Arreglo del bug diario. Especificado al detalle | Orquestador; cada subagente recibe solo su paquete |
+| [`fase-1-confianza.md`](fase-1-confianza.md) | Persistencia por app, avisos, canal de eventos | Ídem, cuando toque |
+| [`fase-2-velocidad.md`](fase-2-velocidad.md) | Teclado, arrastre de ventanas reales, miniaturas | Ídem |
+| [`fase-3-distribucion.md`](fase-3-distribucion.md) | Firma estable, onboarding, idioma | Ídem |
+| [`../../demo/proposals/ux-propuesta.html`](../../demo/proposals/ux-propuesta.html) | Referencia visual animada de cada propuesta de UX (escenas 1–5) | Orquestador, al diseñar UI |
+
+Las fases van en orden. No empezar una fase sin cerrar la anterior: cada una asume los invariantes de la previa.
+
+## Roles y modelos
+
+| Rol | Modelo previsto | Hace | No hace |
+|---|---|---|---|
+| **Orquestador** `[ORQ]` | Opus 5.5, esfuerzo alto | Decisiones de diseño (UX/UI y de arquitectura no especificadas), preparar y lanzar los paquetes, verificar lo que vuelve, integración, documentación, build/instalación, aceptación en vivo, PR | Implementar lógica ya especificada que un subagente puede hacer |
+| **Subagente de implementación** `[SUB-impl]` | Sol 6.1 | Un paquete de lógica con especificación cerrada: código + tests + informe | Decidir diseño, tocar archivos fuera del paquete, instalar, tocar el estado real del usuario |
+| **Subagente de revisión** `[SUB-rev]` | Sol 6.1 | Buscar bugs en un diff contra los invariantes del paquete | Reescribir el código; aprobar por estilo |
+| **Humano** `[HUM]` | Fernando | Cerrar/abrir apps, re-aprobar Accesibilidad, pruebas físicas (bloqueo, monitor), decisiones marcadas | — |
+
+Si el modelo previsto para subagentes no está disponible en el entorno, el orquestador lo informa al humano y espera; no lo sustituye por otro por su cuenta.
+
+## Reglas comunes (pegar tal cual en cada encargo a un subagente)
+
+1. Antes de modificar la implementación leé `AGENTS.md`, `CONTRIBUTING.md`, `docs/architecture.md` y `UPSTREAM.md`. No hace falta leer el resto de `docs/plan/`: tu paquete es autosuficiente.
+2. Tocá solo los archivos que tu paquete lista. Si necesitás tocar otro, detenete e informalo.
+3. **Nunca** leas, modifiques ni borres `~/Library/Application Support/AeroGrid`, `~/Applications/AeroGrid*.app` ni `~/.aerospace.toml`. Nunca ejecutes `scripts/install.py`, `scripts/uninstall.py` ni cierres o abras las apps instaladas. Los tests usan directorios temporales.
+4. No debilites ni borres aserciones existentes para que un test pase. Si un test existente contradice la especificación, detenete e informalo con el nombre del test.
+5. Los cambios en `vendor/AeroSpace` se limitan al backend propio: todo comportamiento nuevo va detrás de `gridOwnsBackendUI()` o dentro de los archivos `Grid*.swift`. AeroSpace independiente debe comportarse igual que antes.
+6. Sin dependencias nuevas. `GridCore` solo usa Foundation (y CryptoKit, ya presente).
+7. Los registros de diagnóstico no llevan títulos de ventana, nombres de apps ni rutas: solo IDs numéricos, prefijos de identificadores y motivos.
+8. Los archivos `Sources/GridCore/DynamicEngine.swift` y `Sources/AeroGrid/AppModel.swift` tienen líneas muy largas: leelos por rangos, no enteros.
+9. Validación: cambios del controlador con `swift test`; cambios del backend con `(cd vendor/AeroSpace && swift test)`. Corré primero solo tus tests (`swift test --filter <Clase>`) y la suite completa una vez al final.
+10. Entregá un informe corto: archivos tocados, tests agregados o adaptados (con nombre), comandos ejecutados con su resultado literal, y cualquier desviación de la especificación. No describas lo que no verificaste como verificado.
+
+## Protocolo por paquete (orquestador)
+
+1. Leé la ficha del paquete en el archivo de la fase. Resolvé primero lo marcado como **Decisión**.
+2. Encargo al subagente = *Reglas comunes* + la ficha completa del paquete, pegadas. No resumas la ficha: el resumen pierde las condiciones de borde.
+3. Al volver: leé el diff vos mismo y corré los comandos de **Verificación** de la ficha. El informe del subagente no cuenta como evidencia.
+4. Revisión independiente `[SUB-rev]`: pasale el diff y la sección **Invariantes**, no tus conclusiones. Arreglá vos los hallazgos chicos; reabrí el paquete solo si el hallazgo es de diseño.
+5. Un commit por paquete. Actualizá el tablero de abajo en el mismo commit.
+6. Un PR por fase (o por bloque indicado en la fase). Instalación en vivo: **una sola por PR**, al final; cada instalación con binario distinto obliga al humano a re-aprobar Accesibilidad para las dos apps.
+
+### Cuándo parar y consultar al humano
+
+- Hace falta cerrar las apps, instalar, aprobar permisos o hacer una prueba física.
+- Una **Decisión** de la ficha no tiene default o el default no aplica.
+- Un test existente solo pasa debilitando una aserción.
+- El código real contradice la ficha (función que no existe, firma distinta, comportamiento distinto al descrito).
+- Una API privada de macOS no responde como la ficha supone.
+
+### Economía de contexto
+
+- No rehagas el diagnóstico: está en `diagnostico.md` con las referencias de código.
+- Paquetes que tocan directorios disjuntos (`Sources/GridCore` vs `vendor/AeroSpace`) pueden ir en paralelo; los que comparten archivo, en serie.
+- La suite del backend es grande: corrida completa una vez por PR, no por paquete.
+- Si la sesión se corta, el tablero y `git log` alcanzan para retomar: no hay otro estado.
+
+## Definición de terminado (por fase)
+
+- Suites en verde, con la salida real: `swift test`, `(cd vendor/AeroSpace && swift test)`, y las tres de Python de `CONTRIBUTING.md` si se tocó `scripts/`.
+- `scripts/aerospace-grid.patch` regenerado si cambió `vendor/AeroSpace`, y `UPSTREAM.md` al día.
+- Documentación al día (`docs/architecture.md`, `docs/troubleshooting.md`, `README.md` si cambia un límite declarado).
+- Build e instalación hechas con las apps cerradas, configuración y distribuciones preservadas.
+- Aceptación: lo simulado y lo físico informados por separado. Un test de modelo o una animación no cuentan como aceptación física.
+- PR creado; merge cuando la aceptación física mínima de la fase pasó.
+
+## Tablero de estado
+
+Actualizar al cerrar cada paquete: estado (`pendiente`, `en curso`, `hecho`, `bloqueado`), PR y fecha.
+
+| Paquete | Rol | Estado | PR | Fecha |
+|---|---|---|---|---|
+| F0-1 Sonda de bloqueo | ORQ + HUM | pendiente | | |
+| F0-2 Compuerta de reconciliación | SUB-impl | pendiente | | |
+| F0-3 Reconciliación fullscreen con confianza | SUB-impl | pendiente | | |
+| F0-4 Conectar compuerta y registro en la app | SUB-impl | pendiente | | |
+| F0-5 Backend: retener ventanas fullscreen | SUB-impl | pendiente | | |
+| F0-6 Backend: salida de fullscreen corroborada | SUB-impl | pendiente | | |
+| F0-7 Revisión independiente | SUB-rev | pendiente | | |
+| F0-8 Docs, instalación, aceptación, PR | ORQ + HUM | pendiente | | |
+| F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
+| F1-1 … F1-7 | ver fase 1 | pendiente | | |
+| F2-1 … F2-4 | ver fase 2 | pendiente | | |
+| F3-1 … F3-5 | ver fase 3 | pendiente | | |
+
+## Mensaje de arranque para el orquestador
+
+```text
+Vas a ejecutar la Fase 0 del plan de AeroGrid. Leé docs/plan/README.md y docs/plan/fase-0-fullscreen.md
+(diagnostico.md una vez, como contexto). Seguí el protocolo por paquete: vos diseñás, verificás, integrás
+y hacés la aceptación; la lógica especificada y la revisión de bugs las delegás a subagentes Sol 6.1,
+pasándoles las Reglas comunes más la ficha completa del paquete. Empezá por F0-1, que necesita que yo
+bloquee la Mac: avisame cuando la sonda esté lista. Trabajá sobre la rama del plan (o main si ya está
+mergeada). Una sola instalación, al final, y avisame antes de cerrar las apps.
+```

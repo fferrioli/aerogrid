@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>AeroGrid · hoy vs. propuesta</title>
+<style>
+.ag{--fg:var(--foreground,CanvasText);--mut:var(--muted-foreground,GrayText);--bd:var(--border,rgba(128,128,128,.32));
+  --ok:var(--success,#30d158);--warn:var(--warning,#ff9f0a);--pri:var(--primary,#e8559b);--sec:var(--secondary,rgba(128,128,128,.16));
+  --bar:color-mix(in srgb,var(--foreground,CanvasText) 36%,transparent);--r:var(--radius,10px);
+  font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif);color:var(--fg);max-width:1400px;margin:0 auto;font-size:14px;line-height:1.4}
+.ag *{box-sizing:border-box}
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:none;font:inherit;font-size:12.5px;font-weight:600;color:var(--mut);background:transparent;border:1px solid var(--bd);border-radius:99px;padding:6px 12px;cursor:pointer;white-space:nowrap}
+.tabs button:hover{color:var(--fg)}
+.tabs button[aria-selected=true]{color:var(--fg);background:var(--sec);border-color:var(--fg)}
+.tabs button:focus-visible,.ctl button:focus-visible{outline:2px solid var(--ring,var(--pri));outline-offset:2px}
+.head h2{font-size:17px;margin:6px 0 2px;font-weight:650;text-wrap:balance}
+.head p{margin:0 0 10px;color:var(--mut);font-size:13px;text-wrap:pretty}
+.panes{display:grid;gap:12px}
+@media(min-width:1080px){.panes{grid-template-columns:1fr 1fr}}
+.pane header{display:flex;gap:10px;align-items:flex-start;min-height:44px;margin-bottom:6px}
+.tag{flex:none;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:3px 8px;border-radius:6px;border:1px solid currentColor;margin-top:1px}
+.hoy .tag{color:var(--warn)}.prop .tag{color:var(--ok)}
+.cap{font-size:13.5px;text-wrap:pretty;transition:opacity .25s}
+.cap.sw{opacity:0}
+.stage{position:relative;border-radius:var(--r);overflow:hidden;background:#141416;border:1px solid var(--bd)}
+.ctl{display:flex;align-items:center;gap:10px;margin-top:10px}
+.ctl button{font:inherit;font-size:12.5px;font-weight:600;color:var(--fg);background:var(--sec);border:1px solid var(--bd);border-radius:8px;padding:5px 12px;cursor:pointer;min-width:84px}
+.prog{flex:1;height:4px;border-radius:9px;background:var(--sec);overflow:hidden}
+.prog i{display:block;height:100%;width:0;background:var(--fg);opacity:.55}
+.note{color:var(--mut);font-size:12px;margin:8px 0 0}
+
+/* ---------- mock de macOS: colores fijos a propósito (representa la UI real, oscura) ---------- */
+.cv{position:absolute;left:0;top:0;width:680px;height:270px;transform-origin:0 0;color:#f2f2f7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;user-select:none}
+.wall{position:absolute;inset:0;background:radial-gradient(120% 90% at 18% 0%,#3b3157 0%,#1c1f33 52%,#121218 100%)}
+.panel{position:absolute;transform:scale(var(--s,1));background:rgba(72,72,74,.94);border:1px solid rgba(255,255,255,.15);border-radius:14px;box-shadow:0 12px 30px rgba(0,0,0,.5);transition:opacity .35s,transform .5s cubic-bezier(.2,.8,.2,1)}
+.panel.off{opacity:0;transform:translateY(-16px) scale(var(--s,1))}
+.ph{position:absolute;left:11px;right:11px;top:6px;height:18px;display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;color:#e5e5ea}
+.ph .sp{flex:1}.ph .gl{opacity:.55;font-size:10px}
+.card{position:absolute;background:#3c3c3e;border:1px solid rgba(255,255,255,.14);border-radius:9px;overflow:hidden;
+  transition:left .6s cubic-bezier(.2,.8,.2,1),top .6s cubic-bezier(.2,.8,.2,1),opacity .45s,transform .45s,border-color .3s,background .3s,box-shadow .3s,filter .4s}
+.card .ch{height:20px;display:flex;align-items:center;gap:4px;padding:0 6px;font-size:9.5px;font-weight:600;color:#e5e5ea;white-space:nowrap}
+.card .grip{opacity:.45;font-size:8px}
+.card .ct{flex:1;overflow:hidden;text-overflow:ellipsis}
+.card .bdg{font-size:9px;color:#f7b3d2;opacity:0;transition:opacity .3s}
+.card.fs .bdg{opacity:1}
+.card .cb{position:absolute;left:5px;right:5px;top:21px;bottom:5px;display:flex;gap:3px}
+.card.hl{background:#6b4c5c;border-color:#e8559b;box-shadow:0 0 0 1.5px #e8559b}
+.card.dim{opacity:.26}
+.card.gone{opacity:0;transform:scale(.84)}
+.card.sleep{opacity:.5;filter:saturate(.3)}
+.card.wrong{border-color:#ff6b6b;box-shadow:0 0 0 1.5px #ff6b6b}
+.card.ok{border-color:#30d158;box-shadow:0 0 0 1.5px #30d158}
+.tile{flex:1;min-width:0;background:#4b4046;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;position:relative;overflow:hidden;transition:background .3s,outline-color .3s}
+.card.hl .tile{background:#6f5261}
+.tile .lb{font-size:8.5px;white-space:nowrap;transition:opacity .4s}
+.tile .ic{transition:opacity .4s,filter .4s}
+.tile.ghost{background:transparent;outline:1px dashed rgba(255,255,255,.34);outline-offset:-1px}
+.tile.ghost .ic{opacity:.3;filter:grayscale(1)}
+.tile.ghost .lb{opacity:.55}
+.tile.empty .lb{opacity:.45;font-size:8px}
+.tile .th{position:absolute;inset:3px;border-radius:4px;opacity:0;transition:opacity .7s;overflow:hidden;background:#1c1c1e}
+.tile .th svg{width:100%;height:100%;display:block}
+.tile .mini{position:absolute;left:5px;bottom:5px;opacity:0;transition:opacity .7s}
+.thumbs .tile .th,.thumbs .tile .mini{opacity:1}
+.thumbs .tile>.ic:not(.mini),.thumbs .tile .lb{opacity:0}
+.ic{display:inline-flex;border-radius:23%;box-shadow:0 1px 2px rgba(0,0,0,.45);flex:none;overflow:hidden}
+.ic svg{width:100%;height:100%;display:block}
+.chip{position:absolute;left:50%;bottom:4px;transform:translate(-50%,7px);font-size:8px;font-weight:700;padding:2px 6px;border-radius:99px;white-space:nowrap;opacity:0;transition:opacity .3s,transform .3s;z-index:3;background:#2c2c2e;color:#d1d1d6}
+.chip.on{opacity:1;transform:translate(-50%,0)}
+.chip.bad{background:#ff6b6b;color:#2a0808}.chip.good{background:#30d158;color:#04260f}
+.slot{position:absolute;border:1.5px dashed rgba(232,85,155,.75);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:8.5px;color:#f7b3d2;opacity:0;transition:opacity .45s}
+.slot.on{opacity:1}
+.veil{position:absolute;inset:0;background:rgba(6,6,10,.66);opacity:0;transition:opacity .5s;z-index:20;display:flex;align-items:center;justify-content:flex-start;pointer-events:none}
+.veil.on{opacity:1}
+.veil .lk{margin-left:176px;display:flex;flex-direction:column;align-items:center;gap:5px;font-size:10px;color:#e5e5ea}
+.stat{position:absolute;left:456px;top:18px;width:212px;text-align:center;z-index:25}
+.stat b{display:block;font-size:27px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.stat span{display:block;font-size:10.5px;color:#c7c7cc;margin-top:1px}
+.dock{position:absolute;display:flex;gap:7px;padding:6px 8px;border-radius:13px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.18);opacity:0;transform:translateY(10px);transition:opacity .35s,transform .35s;z-index:26}
+.dock.on{opacity:1;transform:none}
+.dlabel{position:absolute;font-size:9px;color:#aeaeb2;opacity:0;transition:opacity .35s;z-index:26;text-align:center}
+.dlabel.on{opacity:1}
+.tp{position:absolute;width:116px;height:78px;border-radius:11px;background:linear-gradient(#3a3a3d,#2c2c2f);border:1px solid rgba(255,255,255,.18);opacity:0;transition:opacity .35s;z-index:26}
+.tp.on{opacity:1}
+.tp i{position:absolute;top:34px;width:11px;height:11px;border-radius:50%;background:#f2f2f7;opacity:0}
+.keys{position:absolute;display:flex;gap:5px;justify-content:center;z-index:26}
+.key{min-width:26px;height:26px;padding:0 7px;border-radius:6px;background:linear-gradient(#58585c,#3e3e42);border:1px solid rgba(255,255,255,.22);box-shadow:0 2px 0 rgba(0,0,0,.5);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center}
+.search{position:absolute;height:22px;border-radius:7px;background:#1f1f22;border:1px solid #e8559b;box-shadow:0 0 0 2px rgba(232,85,155,.25);font-size:10.5px;display:flex;align-items:center;gap:5px;padding:0 8px;opacity:0;transition:opacity .25s;z-index:8}
+.search.on{opacity:1}
+.search .q{color:#fff}.search .hint{color:#8e8e93}
+.search .caret{width:1px;height:12px;background:#e8559b;animation:bl 1s steps(1) infinite}
+@keyframes bl{50%{opacity:0}}
+.pill{position:absolute;font-size:10px;font-weight:650;padding:5px 10px;border-radius:99px;background:#e8559b;color:#fff;opacity:0;transition:opacity .35s,background .3s;z-index:26;white-space:nowrap}
+.pill.on{opacity:1}.pill.alt{background:#58585c}
+.toast{position:absolute;left:50%;bottom:12px;transform:translate(-50%,14px);opacity:0;transition:opacity .35s,transform .35s;z-index:30;background:#1c1c1e;border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:6px 10px;font-size:10px;display:flex;gap:10px;align-items:center;white-space:nowrap;box-shadow:0 8px 20px rgba(0,0,0,.5)}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+.toast u{text-decoration:none;color:#f7b3d2;font-weight:700}
+.cur{position:absolute;left:0;top:0;width:15px;height:15px;opacity:0;z-index:60;transition:transform .6s cubic-bezier(.3,.7,.2,1),opacity .2s;pointer-events:none}
+.rip{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;border:2px solid #fff;z-index:59;pointer-events:none}
+.fly{position:absolute;left:0;top:0;z-index:55;transition:transform .6s cubic-bezier(.3,.7,.2,1);pointer-events:none}
+.mbar{position:absolute;left:0;right:0;top:0;height:15px;background:rgba(20,20,24,.7);z-index:4}
+.notch{position:absolute;left:50%;top:0;width:78px;height:15px;margin-left:-39px;background:#000;border-radius:0 0 7px 7px;z-index:5}
+.ring{position:absolute;left:340px;top:22px;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;border:2px solid #e8559b;opacity:0;z-index:40}
+.win{position:absolute;border-radius:9px;background:#f4f4f6;box-shadow:0 14px 34px rgba(0,0,0,.55);overflow:hidden;z-index:35;transition:transform .7s cubic-bezier(.3,.7,.2,1),opacity .3s}
+.win .tb{height:15px;background:#dedee2;display:flex;align-items:center;gap:3px;padding:0 6px}
+.win .tb i{width:6px;height:6px;border-radius:50%;background:#ff5f57}.win .tb i+i{background:#febc2e}.win .tb i+i+i{background:#28c840}
+.win .tb span{margin-left:6px;font-size:8px;color:#444;font-weight:600}
+.win .body{padding:9px}
+.win .body div{height:6px;border-radius:3px;background:#d0d0d6;margin-bottom:6px}
+.win.dark{background:#1e1f26}.win.dark .tb{background:#2b2d36}.win.dark .tb span{color:#c7c7cc}.win.dark .body div{background:#3a3d4a}
+.noanim *,.noanim *::before{transition:none!important;animation:none!important}
+
+/* ---------- puntaje ---------- */
+.score{display:none}
+.score.on{display:block}
+.row{display:grid;grid-template-columns:minmax(150px,34%) 1fr 40px;gap:10px;align-items:center;padding:5px 0;font-size:13px}
+.row .nm{color:var(--fg);text-wrap:balance}
+.row .tr{position:relative;height:16px}
+.row .tr::before{content:"";position:absolute;inset:0;border-radius:4px;background:var(--sec);opacity:.5}
+.row .br{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;background:var(--bar);width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.row.me .br{background:var(--pri)}
+.row.goal .br{background:repeating-linear-gradient(135deg,var(--pri) 0 5px,transparent 5px 8px);border:1.5px solid var(--pri)}
+.row .vl{font-variant-numeric:tabular-nums;font-weight:650;text-align:right}
+.row.me .nm,.row.goal .nm{font-weight:650}
+.axis{display:grid;grid-template-columns:minmax(150px,34%) 1fr 40px;gap:10px;font-size:11px;color:var(--mut);margin-top:2px}
+.axis div:nth-child(2){display:flex;justify-content:space-between}
+.steps{display:flex;flex-wrap:wrap;gap:6px 4px;align-items:center;margin-top:14px;font-size:12.5px}
+.steps b{font-variant-numeric:tabular-nums}
+.steps span{border:1px solid var(--bd);border-radius:8px;padding:4px 9px}
+.steps em{font-style:normal;color:var(--mut)}
+.steps i{font-style:normal;color:var(--mut)}
+.steps span{white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="ag" id="ag">
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="head"><h2 id="ttl"></h2><p id="sub"></p></div>
+  <div id="play">
+    <div class="panes">
+      <section class="pane hoy"><header><span class="tag">Hoy</span><span class="cap" id="capA"></span></header><div class="stage" id="stA"><div class="cv"></div></div></section>
+      <section class="pane prop"><header><span class="tag">Propuesta</span><span class="cap" id="capB"></span></header><div class="stage" id="stB"><div class="cv"></div></div></section>
+    </div>
+    <div class="ctl"><button id="pp" type="button">Pausar</button><button id="rs" type="button">Reiniciar</button><div class="prog" aria-hidden="true"><i id="pg"></i></div></div>
+    <p class="note">Recreación animada con apps ficticias. «Hoy» reproduce el comportamiento actual verificado en el código; «Propuesta» es un diseño, todavía no implementado.</p>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+<script>
+(()=>{
+const W=680,H=270;
+const $=(t,c,p,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;if(p)p.appendChild(e);return e};
+const NAME={editor:'Editor',browser:'Navegador',chat:'Chat',term:'Terminal',notes:'Notas',music:'Música'};
+const ICON={
+ editor:['linear-gradient(#55a2ff,#1d6be0)','<path d="M9.5 8 6 12l3.5 4M14.5 8 18 12l-3.5 4" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'],
+ browser:['linear-gradient(#eef6ff,#bcd9f7)','<circle cx="12" cy="12" r="7" fill="#1e88e5"/><path d="M15.5 8.5 13.2 13.2 8.5 15.5 10.8 10.8z" fill="#fff"/>'],
+ chat:['linear-gradient(#5fe36f,#22b53a)','<path d="M5.5 7h13v8.5h-7L8 18.5v-3H5.5z" fill="#fff"/>'],
+ term:['linear-gradient(#3a3a3d,#111113)','<path d="M7 9l3 3-3 3M12.5 15H17" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'],
+ notes:['linear-gradient(#ffe066,#f5c400)','<path d="M7 9h10M7 12h10M7 15h6" stroke="#5c4700" stroke-width="1.6" stroke-linecap="round"/>'],
+ music:['linear-gradient(#ff6b81,#f0284a)','<path d="M10 16V8l7-1.5V14" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8.3" cy="16" r="2" fill="#fff"/><circle cx="15.3" cy="14" r="2" fill="#fff"/>']};
+const THUMB={
+ editor:'<rect width="60" height="40" fill="#1e1f29"/><rect x="0" width="12" height="40" fill="#262835"/><rect x="16" y="6" width="22" height="3" rx="1.5" fill="#c792ea"/><rect x="16" y="12" width="34" height="3" rx="1.5" fill="#82aaff"/><rect x="20" y="18" width="26" height="3" rx="1.5" fill="#c3e88d"/><rect x="20" y="24" width="18" height="3" rx="1.5" fill="#f78c6c"/><rect x="16" y="30" width="12" height="3" rx="1.5" fill="#82aaff"/>',
+ browser:'<rect width="60" height="40" fill="#fff"/><rect width="60" height="7" fill="#e6e6ea"/><rect x="18" y="2" width="24" height="3" rx="1.5" fill="#fff"/><rect x="6" y="11" width="30" height="4" rx="2" fill="#222"/><rect x="6" y="18" width="48" height="2.5" rx="1" fill="#b9b9c0"/><rect x="6" y="23" width="44" height="2.5" rx="1" fill="#b9b9c0"/><rect x="6" y="28" width="46" height="2.5" rx="1" fill="#b9b9c0"/><rect x="6" y="33" width="20" height="2.5" rx="1" fill="#b9b9c0"/>',
+ dash:'<rect width="60" height="40" fill="#f6f7fb"/><rect width="60" height="7" fill="#e6e6ea"/><rect x="18" y="2" width="24" height="3" rx="1.5" fill="#fff"/><rect x="5" y="11" width="15" height="9" rx="2" fill="#dfe6ff"/><rect x="23" y="11" width="15" height="9" rx="2" fill="#ffe3ec"/><rect x="41" y="11" width="14" height="9" rx="2" fill="#dcf5e3"/><path d="M6 35l9-6 8 3 9-8 8 4 13-9" stroke="#4f7cff" stroke-width="1.8" fill="none"/>',
+ chat:'<rect width="60" height="40" fill="#1c1c1e"/><rect x="5" y="6" width="26" height="7" rx="3.5" fill="#3a3a3c"/><rect x="27" y="16" width="28" height="7" rx="3.5" fill="#30b94d"/><rect x="5" y="26" width="20" height="7" rx="3.5" fill="#3a3a3c"/>',
+ term:'<rect width="60" height="40" fill="#0d0d0f"/><rect x="5" y="7" width="20" height="2.5" rx="1" fill="#30d158"/><rect x="5" y="13" width="38" height="2.5" rx="1" fill="#c7c7cc"/><rect x="5" y="19" width="30" height="2.5" rx="1" fill="#c7c7cc"/><rect x="5" y="25" width="14" height="2.5" rx="1" fill="#30d158"/><rect x="21" y="25" width="5" height="2.5" fill="#fff"/>',
+ notes:'<rect width="60" height="40" fill="#fff8d6"/><rect x="6" y="7" width="26" height="4" rx="2" fill="#5c4700"/><rect x="6" y="15" width="46" height="2.5" rx="1" fill="#c9b667"/><rect x="6" y="20" width="40" height="2.5" rx="1" fill="#c9b667"/><rect x="6" y="25" width="44" height="2.5" rx="1" fill="#c9b667"/>',
+ music:'<rect width="60" height="40" fill="#2a0f16"/><rect x="6" y="8" width="18" height="18" rx="3" fill="#f0284a"/><rect x="28" y="10" width="24" height="3" rx="1.5" fill="#fff"/><rect x="28" y="16" width="16" height="2.5" rx="1" fill="#a58b90"/><rect x="6" y="31" width="48" height="2.5" rx="1" fill="#5a3a40"/><rect x="6" y="31" width="20" height="2.5" rx="1" fill="#fff"/>'};
+const icon=(k,s=22,cls='ic')=>{const e=$('span',cls);e.style.cssText=`width:${s}px;height:${s}px;background:${ICON[k][0]}`;e.innerHTML=`<svg viewBox="0 0 24 24">${ICON[k][1]}</svg>`;return e};
+const spec=a=>typeof a==='string'?{k:a,th:a}:a;
+
+class Board{
+  constructor(cv,o={}){Object.assign(this,{x:12,y:12,cols:4,rows:2,cw:104,ch:96,s:1,title:'Tus espacios'},o);
+    this.pad=10;this.hd=24;this.cv=cv;this.cards={};
+    this.w=this.cols*this.cw-6+this.pad*2;this.h=this.rows*this.ch-6+this.pad*2+this.hd;
+    const p=this.el=$('div','panel',cv);p.style.cssText=`left:${this.x}px;top:${this.y}px;width:${this.w}px;height:${this.h}px;--s:${this.s};transform-origin:50% 0`;
+    $('div','ph',p,`<span class="gl">▦</span><span>${this.title}</span><span class="sp"></span><span class="gl">↶</span><span class="gl">✕</span>`);}
+  pos(c,r){return[this.pad+c*this.cw,this.pad+this.hd+r*this.ch]}
+  card(id,c,r,title,apps,o={}){const e=$('div','card'+(o.fs?' fs':'')+(o.cls?' '+o.cls:''),this.el);const[x,y]=this.pos(c,r);
+    e.style.cssText=`left:${x}px;top:${y}px;width:${this.cw-6}px;height:${this.ch-6}px`;
+    e.innerHTML=`<div class="ch"><span class="grip">⠿</span><span class="ct"></span><span class="bdg">⛶</span></div><div class="cb"></div><span class="chip"></span>`;
+    this.cards[id]={e,c,r};this.title_(id,title);this.apps(id,apps);return e}
+  title_(id,t){this.cards[id].e.querySelector('.ct').textContent=t}
+  apps(id,apps,o={}){const cb=this.cards[id].e.querySelector('.cb');cb.innerHTML='';this.cards[id].apps=apps;
+    if(!apps.length){$('div','tile empty',cb,'<span class="lb">vacío</span>');return}
+    const small=apps.length>2;
+    for(const raw of apps){const a=spec(raw);const t=$('div','tile'+(o.ghost?' ghost':''),cb);t.dataset.k=a.k;
+      t.appendChild(icon(a.k,small?15:apps.length>1?19:23));
+      if(!small)$('span','lb',t,NAME[a.k]);
+      $('div','th',t,`<svg viewBox="0 0 60 40" preserveAspectRatio="xMidYMid slice">${THUMB[a.th||a.k]}</svg>`);t.appendChild(icon(a.k,11,'ic mini'));}}
+  ghost(id,k,on){this.cards[id].e.querySelectorAll('.tile').forEach(t=>{if(!k||t.dataset.k===k)t.classList.toggle('ghost',on)})}
+  set(id,cls,on){this.cards[id].e.classList.toggle(cls,!!on)}
+  move(id,c,r){const k=this.cards[id];k.c=c;k.r=r;const[x,y]=this.pos(c,r);k.e.style.left=x+'px';k.e.style.top=y+'px'}
+  chip(id,text,kind){const c=this.cards[id].e.querySelector('.chip');if(!text){c.classList.remove('on');return}c.textContent=text;c.className='chip on '+(kind||'')}
+  slot(c,r,text){const e=$('div','slot',this.el,text);const[x,y]=this.pos(c,r);e.style.cssText=`left:${x}px;top:${y}px;width:${this.cw-6}px;height:${this.ch-6}px`;e.getBoundingClientRect();e.classList.add('on')}
+  // centro de una tarjeta (o de uno de sus casilleros) en coordenadas del lienzo
+  center(id,i=-1){const k=this.cards[id];const[x,y]=this.pos(k.c,k.r);const cw=this.cw-6,n=Math.max(1,k.apps.length);
+    const lx=i<0?x+cw/2:x+5+(cw-10)*(i+.5)/n,ly=y+(i<0?(this.ch-6)/2:21+(this.ch-32)/2);
+    return[this.x+this.w/2+(lx-this.w/2)*this.s,this.y+ly*this.s]}
+  show(on){this.el.classList.toggle('off',!on)}
+  thumbs(on){this.el.classList.toggle('thumbs',on)}
+}
+const mk={
+ stat(cv){const e=$('div','stat',cv,'<b></b><span></span>');return(a,b)=>{e.firstChild.textContent=a;e.lastChild.textContent=b}},
+ veil(cv){const e=$('div','veil',cv,'<div class="lk"><svg width="26" height="30" viewBox="0 0 26 30"><rect x="3" y="13" width="20" height="15" rx="4" fill="#e5e5ea"/><path d="M7.5 13V9a5.5 5.5 0 0 1 11 0v4" stroke="#e5e5ea" stroke-width="2.6" fill="none"/></svg><span>Pantalla bloqueada</span></div>');return on=>e.classList.toggle('on',on)},
+ dock(cv,x,y,kinds,label){const e=$('div','dock',cv);e.style.left=x+'px';e.style.top=y+'px';const m={};kinds.forEach((k,i)=>{m[k]=e.appendChild(icon(k,22));m[k].i=i});
+   const l=$('div','dlabel',cv,label||'Dock');l.style.cssText=`left:${x}px;top:${y+38}px;width:${kinds.length*29+9}px`;
+   return{show(on=true){e.classList.toggle('on',on);l.classList.toggle('on',on)},x:k=>x+9+m[k].i*29+11,y:y+18,
+     bounce:k=>m[k].animate([{transform:'translateY(0)'},{transform:'translateY(-9px)'},{transform:'translateY(0)'},{transform:'translateY(-4px)'},{transform:'translateY(0)'}],{duration:620,easing:'ease-out'})}},
+ trackpad(cv,x,y){const e=$('div','tp',cv);e.style.left=x+'px';e.style.top=y+'px';const f=[0,1,2].map(i=>{const d=$('i','',e);d.style.left=(36+i*17)+'px';return d});
+   return{show(on=true){e.classList.toggle('on',on)},swipe(dir){const[dx,dy]={right:[26,0],left:[-26,0],down:[0,18],up:[0,-18]}[dir];
+     f.forEach((d,i)=>d.animate([{transform:`translate(${-dx/2}px,${-dy/2}px)`,opacity:0},{opacity:1,offset:.2},{transform:`translate(${dx/2}px,${dy/2}px)`,opacity:1,offset:.8},{transform:`translate(${dx/2}px,${dy/2}px)`,opacity:0}],{duration:620,delay:i*25,easing:'ease-in-out'}))}}},
+ keys(cv,x,y,w){const e=$('div','keys',cv);e.style.cssText=`left:${x}px;top:${y}px;width:${w}px`;
+   return{set(a){e.innerHTML='';a.forEach(k=>$('span','key',e,k))},press(){[...e.children].forEach(k=>k.animate([{transform:'translateY(0)',filter:'brightness(1)'},{transform:'translateY(2px)',filter:'brightness(1.7)'},{transform:'translateY(0)',filter:'brightness(1)'}],{duration:340}))}}},
+ cursor(cv){const e=$('div','cur',cv,'<svg viewBox="0 0 15 15"><path d="M1.5 1l10.5 5.2-4.4 1.5-1.6 4.5z" fill="#fff" stroke="#000" stroke-width="1"/></svg>');let p=[0,0];
+   return{show(x,y){e.style.transitionDuration='0s';e.style.transform=`translate(${x}px,${y}px)`;p=[x,y];e.getBoundingClientRect();e.style.opacity=1},
+     hide(){e.style.opacity=0},to(x,y,ms=600){e.style.transitionDuration=ms+'ms,.2s';e.style.transform=`translate(${x}px,${y}px)`;p=[x,y]},
+     click(){const r=$('div','rip',cv);r.style.left=p[0]+'px';r.style.top=p[1]+'px';r.animate([{transform:'scale(.3)',opacity:.9},{transform:'scale(1.25)',opacity:0}],{duration:440}).onfinish=()=>r.remove()}}},
+ fly(cv,k,x0,y0,x1,y1,ms=600,s=20){const e=icon(k,s,'ic fly');cv.appendChild(e);e.style.transitionDuration=ms+'ms';e.style.transform=`translate(${x0-s/2}px,${y0-s/2}px)`;e.getBoundingClientRect();
+   e.style.transform=`translate(${x1-s/2}px,${y1-s/2}px)`;P.later(()=>e.remove(),ms+60)},
+ toast(cv,cx){const e=$('div','toast',cv);if(cx)e.style.left=cx+'px';return{show(t,a){e.innerHTML=`<span>${t}</span>`+(a?`<u>${a}</u>`:'');e.classList.add('on')},hide(){e.classList.remove('on')}}},
+ pill(cv,x,y,t){const e=$('div','pill',cv,t);e.style.left=x+'px';e.style.top=y+'px';return e},
+ win(cv,x,y,w,h,title,dark){const e=$('div','win'+(dark?' dark':''),cv,`<div class="tb"><i></i><i></i><i></i><span>${title}</span></div><div class="body"><div style="width:70%"></div><div></div><div style="width:86%"></div><div style="width:55%"></div><div style="width:78%"></div></div>`);
+   e.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px;transform-origin:50% 7px`;const gx=x+w/2,gy=y+7;
+   return{e,grab:[gx,gy],to(cx,cy,s,ms=700){e.style.transitionDuration=ms+'ms,.3s';e.style.transform=`translate(${cx-gx}px,${cy-gy}px) scale(${s})`},hide(){e.style.opacity=0}}}
+};
+
+/* ---------------- escenas ---------------- */
+function boardScene(cv,cards,o){const c={cv,b:new Board(cv,o)};for(const k of cards)c.b.card(...k);return c}
+const S=[];
+
+S.push({tab:'1 · Fullscreen',title:'Las apps en pantalla completa conservan su lugar',
+ sub:'El problema de todos los días: tras unas horas con la pantalla bloqueada, los casilleros fullscreen desaparecen y vuelven en otro lado.',len:14.2,
+ setup(cv,side){const c=boardScene(cv,[['chat',0,0,'Chat',['chat'],{cls:'hl'}],['ed',1,0,'Editor',['editor'],{fs:1}],['br',2,0,'Navegador',['browser'],{fs:1}],['no',0,1,'Notas',['notes']],['te',1,1,'Terminal',['term']]]);
+   c.st=mk.stat(cv);c.veil=mk.veil(cv);c.cur=mk.cursor(cv);
+   if(side==='a')c.dock=mk.dock(cv,484,196,['chat','editor','browser','notes','term']);else c.tp=mk.trackpad(cv,504,150);return c},
+ steps:[
+  [0,'ab',c=>{c.st('19:40','Tu setup armado');c.cap('Tu setup: Editor y Navegador en pantalla completa, cada uno en su casillero.')}],
+  [2.2,'ab',c=>{c.veil(true);c.st('19:42','Te vas; la pantalla se bloquea')}],
+  [2.5,'a',c=>c.cap('Con la pantalla bloqueada, macOS deja de responder por Accesibilidad. AeroGrid sigue consultando cada 2 s…')],
+  [2.5,'b',c=>c.cap('AeroGrid detecta el bloqueo y deja de reconciliar el mapa: no decide nada a ciegas.')],
+  [3.9,'a',c=>{c.b.set('ed','gone',1);c.b.slot(1,0,'acá estaba');c.cap('…y toma «no la veo» por «se cerró»: borra el casillero de Editor…')}],
+  [4.7,'a',c=>{c.b.set('br','gone',1);c.b.slot(2,0,'acá estaba');c.cap('…y el de Navegador. El mapa sin ellas queda guardado en disco.')}],
+  [3.9,'b',c=>{for(const i of['ed','br']){c.b.set(i,'sleep',1);c.b.chip(i,'☾ en reposo')}}],
+  [5.9,'ab',c=>{c.veil(false);c.st('09:10','Volvés, horas después')}],
+  [6.1,'a',c=>c.cap('A la mañana: los dos casilleros ya no están en el mapa. Las apps siguen abiertas, pero no se llega con gestos.')],
+  [6.1,'b',c=>{c.b.set('ed','sleep',0);c.b.set('ed','ok',1);c.b.chip('ed','✓ sigue acá','good');c.cap('A la mañana: confirma con WindowServer que las ventanas siguen vivas…')}],
+  [6.7,'b',c=>{c.b.set('br','sleep',0);c.b.set('br','ok',1);c.b.chip('br','✓ sigue acá','good')}],
+  [7.4,'a',c=>{c.b.move('ed',3,1);c.b.move('br',3,0);c.dock.show();c.cur.show(470,130);c.cap('Para recuperarlas hay que ir al Dock…')}],
+  [7.9,'a',c=>c.cur.to(c.dock.x('editor'),c.dock.y,560)],
+  [8.6,'a',c=>{c.cur.click();c.dock.bounce('editor')}],
+  [9.2,'a',c=>{c.b.set('ed','gone',0);c.b.set('ed','wrong',1);c.b.chip('ed','otro lugar','bad');c.cap('…y reaparecen junto al espacio que estaba activo, no donde las dejaste.')}],
+  [9.9,'a',c=>c.cur.to(c.dock.x('browser'),c.dock.y,420)],
+  [10.5,'a',c=>{c.cur.click();c.dock.bounce('browser')}],
+  [11.1,'a',c=>{c.b.set('br','gone',0);c.b.set('br','wrong',1);c.b.chip('br','otro lugar','bad')}],
+  [8.0,'b',c=>{for(const i of['ed','br']){c.b.set(i,'ok',0);c.b.chip(i)}c.tp.show();c.cap('…y cada una sigue en su casillero. Navegás con el gesto de siempre, sin Dock.')}],
+  [8.8,'b',c=>c.tp.swipe('right')],[9.3,'b',c=>{c.b.set('chat','hl',0);c.b.set('ed','hl',1)}],
+  [10.4,'b',c=>c.tp.swipe('right')],[10.9,'b',c=>{c.b.set('ed','hl',0);c.b.set('br','hl',1)}],
+  [12.2,'a',c=>c.cap('Resultado: rearmar el setup. Todos los días.')],
+  [12.2,'b',c=>c.cap('Resultado: el mismo setup que dejaste anoche.')]]});
+
+S.push({tab:'2 · El setup vuelve',title:'Cada lugar recuerda su app',
+ sub:'Hoy los lugares están atados a una ventana concreta (ID + arranque). Tras reiniciar o reabrir una app, no queda nada que restaurar.',len:13.4,
+ setup(cv,side){const c=boardScene(cv,[['chat',0,0,'Chat',['chat'],{cls:'hl'}],['ed',1,0,'Editor',['editor'],{fs:1}],['br',2,0,'Navegador',['browser']],['no',0,1,'Notas',['notes']],['te',1,1,'Terminal',['term']]]);
+   c.st=mk.stat(cv);c.cur=mk.cursor(cv);c.dock=mk.dock(cv,484,200,['chat','editor','browser','notes','term'],'las apps se abren');
+   c.where={editor:'ed',browser:'br',notes:'no',term:'te',chat:'chat'};c.n=0;
+   if(side==='b'){c.p1=mk.pill(cv,458,116,'↻ Restaurar «Trabajo»');c.p2=mk.pill(cv,604,116,'Reunión');c.p2.classList.add('alt')}
+   c.drag=(k,tid)=>{const[x0,y0]=c.b.center('chat'),[x1,y1]=c.b.center(tid);c.cur.show(x0,y0);c.cur.to(x1,y1,520);mk.fly(cv,k,x0,y0,x1,y1,520,16)};
+   c.drop=(k,tid)=>{c.have=c.have.filter(a=>a!==k);c.b.apps('chat',c.have);c.b.apps(tid,[k]);c.n++;c.st(String(c.n),'arrastres manuales')};
+   c.land=k=>{const id=c.where[k];mk.fly(cv,k,c.dock.x(k),c.dock.y,...c.b.center(id),560,20);c.dock.bounce(k);P.later(()=>{c.b.ghost(id,k,false);c.b.set(id,'ok',1);P.later(()=>c.b.set(id,'ok',0),500)},560)};
+   return c},
+ steps:[
+  [0,'ab',c=>{c.st('⏻','Reiniciás la Mac');c.cap('Reiniciás la Mac (o una app se cierra y la volvés a abrir).')}],
+  [1.6,'a',c=>{for(const i of['chat','ed','br','no','te']){c.b.apps(i,[]);c.b.title_(i,'Nuevo espacio')}c.b.set('ed','fs',0);c.cap('El mapa queda vacío: los lugares apuntaban a ventanas que ya no existen.')}],
+  [1.6,'b',c=>{for(const i of['chat','ed','br','no','te'])c.b.ghost(i,null,true);c.cap('Los casilleros quedan reservados: cada uno recuerda qué app vive ahí.')}],
+  [3.2,'a',c=>{c.dock.show();c.have=['chat','editor','browser','notes','term'];c.b.apps('chat',c.have);for(const k of c.have)c.dock.bounce(k);c.cap('Las apps abren todas en el espacio actual, apiladas.')}],
+  [4.8,'a',c=>{c.st('0','arrastres manuales');c.cap('Y las repartís a mano, una por una.');c.drag('editor','ed')}],[5.4,'a',c=>c.drop('editor','ed')],
+  [6.0,'a',c=>c.drag('browser','br')],[6.6,'a',c=>c.drop('browser','br')],
+  [7.2,'a',c=>c.drag('notes','no')],[7.8,'a',c=>c.drop('notes','no')],
+  [8.4,'a',c=>c.drag('term','te')],[9.0,'a',c=>{c.drop('term','te');c.cur.hide()}],
+  [9.8,'a',c=>c.cap('Los nombres se perdieron y Editor ya no está en pantalla completa: eso también se rehace a mano.')],
+  [3.2,'b',c=>{c.p1.classList.add('on');c.p2.classList.add('on');c.cur.show(600,170);c.cur.to(522,130,520);c.cap('Un clic en «Restaurar Trabajo» — o simplemente abrís tus apps como siempre.')}],
+  [3.9,'b',c=>{c.cur.click();c.dock.show()}],
+  [4.3,'b',c=>{c.cur.hide();c.land('chat')}],[4.7,'b',c=>c.land('editor')],[5.1,'b',c=>c.land('browser')],[5.5,'b',c=>c.land('notes')],[5.9,'b',c=>c.land('term')],
+  [6.2,'b',c=>{c.st('0','arrastres manuales');c.cap('Cada app va sola a su casillero…')}],
+  [7.4,'b',c=>{c.b.chip('ed','⛶ pantalla completa','good');c.cap('…y vuelve a pantalla completa si así estaba.')}],
+  [9.2,'b',c=>{c.b.chip('ed');c.cur.show(560,170);c.cur.to(634,130,480)}],
+  [9.8,'b',c=>{c.cur.click();c.p2.classList.remove('alt');c.p1.classList.add('alt');c.b.move('chat',2,0);c.b.move('br',0,0);c.b.move('no',1,1);c.b.move('te',0,1);c.cap('Setups con nombre: pasás de «Trabajo» a «Reunión» y el mapa se reacomoda.')}],
+  [11.2,'b',c=>c.cur.hide()]]});
+
+S.push({tab:'3 · Ir a…',title:'Llegar a cualquier espacio sin soltar el teclado',
+ sub:'AeroGrid no tiene hoy ningún atajo de teclado ni búsqueda: todo pasa por el trackpad o por abrir el mapa con el mouse.',len:10.6,
+ setup(cv,side){const c=boardScene(cv,[['chat',0,0,'Chat',['chat'],{cls:'hl'}],['ed',1,0,'Editor',['editor']],['br',2,0,'Navegador',['browser']],['no',0,1,'Notas',['notes']],['mu',1,1,'Música',['music']],['te',2,1,'Terminal',['term']]]);
+   c.st=mk.stat(cv);c.at='chat';c.go=id=>{c.b.set(c.at,'hl',0);c.b.set(id,'hl',1);c.at=id};
+   if(side==='a')c.tp=mk.trackpad(cv,504,128);
+   else{c.keys=mk.keys(cv,456,140,212);c.q=$('div','search',cv,'<span class="hint">Ir a</span><span class="q"></span><span class="caret"></span>');c.q.style.cssText='left:150px;top:14px;width:160px';
+     c.type=t=>{c.q.querySelector('.q').textContent=t;for(const[id,n]of[['chat','chat'],['ed','editor'],['br','navegador'],['no','notas'],['mu','música'],['te','terminal']])c.b.set(id,'dim',t&&!n.startsWith(t))}}
+   return c},
+ steps:[
+  [0,'ab',c=>{c.st('','');c.cap('Estás en Chat y querés ir a Terminal, al otro lado del mapa.')}],
+  [1.2,'a',c=>{c.tp.show();c.st('0','gestos');c.tp.swipe('right')}],[1.7,'a',c=>{c.go('ed');c.st('1','gestos')}],
+  [2.7,'a',c=>c.tp.swipe('right')],[3.2,'a',c=>{c.go('br');c.st('2','gestos')}],
+  [4.2,'a',c=>c.tp.swipe('down')],[4.7,'a',c=>{c.go('te');c.st('3','gestos')}],
+  [5.4,'a',c=>c.cap('Tres gestos (o mantener y explorar). Si no recordás dónde quedó algo, abrís el mapa y lo buscás a ojo.')],
+  [1.2,'b',c=>{c.keys.set(['⌥','Espacio']);c.keys.press();c.cap('⌥ Espacio abre «Ir a…» sobre el mapa.')}],
+  [1.7,'b',c=>c.q.classList.add('on')],[2.4,'b',c=>c.type('t')],[2.8,'b',c=>c.type('te')],[3.2,'b',c=>{c.type('ter');c.b.chip('te','↵ abrir','good');c.cap('Tres letras: el mapa filtra por app, título o nombre del espacio.')}],
+  [4.6,'b',c=>{c.keys.set(['↵']);c.keys.press()}],
+  [4.9,'b',c=>{c.type('');c.q.classList.remove('on');c.b.chip('te');c.go('te');c.cap('Enter y estás ahí: un atajo y tres letras.')}],
+  [6.6,'b',c=>{c.keys.set(['⌃','⌥','←']);c.keys.press();c.go('mu');c.cap('También: ⌃⌥ + flechas para moverte por el mapa…')}],
+  [8.2,'b',c=>{c.keys.set(['⌃','⌥','1']);c.keys.press();c.go('chat');c.cap('…y ⌃⌥ + número para tus lugares fijos.')}]]});
+
+S.push({tab:'4 · Arrastrar ventanas',title:'Arrastrar la ventana real al mapa',
+ sub:'Hoy solo se arrastran tarjetas dentro del organizador. La propuesta toma el gesto del Snap de Windows 11 y lo lleva al mapa completo.',len:9.4,
+ setup(cv,side){$('div','wall',cv);$('div','mbar',cv);$('div','notch',cv);
+   const c={cv,ed:mk.win(cv,330,74,300,170,'Editor',true),w:mk.win(cv,46,60,250,160,'Navegador')};
+   c.b=new Board(cv,{x:125,y:22,s:.6,title:'Tus espacios'});
+   for(const k of[['chat',0,0,'Chat',['chat']],['work',1,0,'Editor · Navegador',['editor','browser'],{cls:'hl'}],['no',2,0,'Notas',['notes']],['mu',0,1,'Música',['music']],['te',2,1,'Terminal',['term']]])c.b.card(...k);
+   c.b.show(false);c.cur=mk.cursor(cv);c.ring=$('div','ring',cv);c.b.el.style.zIndex=38;c.w.e.style.zIndex=45;return c},
+ steps:[
+  [0,'ab',c=>c.cap('Querés mandar el Navegador al espacio de Terminal.')],
+  [1.0,'a',c=>{c.cur.show(170,140);c.cur.to(340,20,650)}],
+  [1.7,'a',c=>{c.ring.animate([{opacity:1,transform:'scale(.3)'},{opacity:1,transform:'scale(1.2)'},{opacity:0,transform:'scale(1.4)'}],{duration:650});c.cap('Llevás el puntero a la cámara y esperás…')}],
+  [2.4,'a',c=>c.b.show(true)],
+  [3.1,'a',c=>{c.cur.to(...c.b.center('work',1),520);c.cap('…se abre el organizador, buscás la tarjeta de la app…')}],
+  [3.9,'a',c=>{const a=c.b.center('work',1),b=c.b.center('te');c.cur.to(...b,700);mk.fly(c.cv,'browser',...a,...b,700,14);c.cap('…y la arrastrás dentro del mapa.')}],
+  [4.7,'a',c=>{c.b.apps('work',['editor']);c.b.apps('te',['term','browser']);c.w.hide()}],
+  [5.5,'a',c=>{c.b.show(false);c.cur.hide();c.cap('Tres pasos. La ventana real no se puede agarrar.')}],
+  [1.0,'b',c=>{c.cur.show(250,170);c.cur.to(...c.w.grab,480)}],
+  [1.6,'b',c=>{c.cur.to(340,58,750);c.w.to(340,58,.42,750);c.cap('Agarrás la ventana real y la llevás hacia la cámara…')}],
+  [2.2,'b',c=>c.b.show(true)],
+  [3.0,'b',c=>{const[x,y]=c.b.center('te');c.cur.to(x+12,y,650);c.w.to(x+12,y,.16,650);c.cap('…el mapa baja solo. Soltás en el destino: centro = apilar, borde = dividir.')}],
+  [3.7,'b',c=>{c.b.set('te','ok',1)}],
+  [4.7,'b',c=>{c.w.hide();c.b.apps('te',['term','browser']);c.b.apps('work',['editor']);c.b.title_('work','Editor')}],
+  [5.5,'b',c=>{c.b.set('te','ok',0);c.b.show(false);c.cur.hide();c.cap('Un solo gesto, sin abrir nada antes.')}]]});
+
+S.push({tab:'5 · Ver y entender',title:'Ver qué hay en cada espacio y enterarte de lo que cambió',
+ sub:'El mapa muestra íconos y los cambios automáticos son silenciosos. Mission Control gana hoy en reconocimiento; nadie avisa con «deshacer».',len:11,
+ setup(cv,side){const c=boardScene(cv,[['chat',0,0,'Chat',['chat']],['ed',1,0,'Editor',['editor'],{cls:'hl'}],['b1',2,0,'Navegador',[{k:'browser',th:'browser'}]],['b2',0,1,'Navegador',[{k:'browser',th:'dash'}]],['te',1,1,'Terminal',['term']]]);
+   c.st=mk.stat(cv);c.cur=mk.cursor(cv);c.toast=mk.toast(cv,226);return c},
+ steps:[
+  [0,'ab',c=>{c.st('','');c.cap('Dos espacios con el mismo navegador: uno con documentación, otro con métricas.')}],
+  [1.8,'a',c=>{c.b.chip('b1','¿cuál es cuál?','bad');c.b.chip('b2','¿cuál es cuál?','bad');c.cap('Con íconos y títulos derivados de la app, las dos tarjetas son idénticas.')}],
+  [1.8,'b',c=>{c.b.thumbs(true);c.cap('Miniaturas vivas (opcionales; piden permiso de grabación de pantalla): reconocés el contenido.')}],
+  [5.0,'a',c=>{c.b.chip('b1');c.b.chip('b2');c.b.card('no',3,1,'Notas',['notes']);c.cap('Y cuando AeroGrid crea o mueve algo solo, no avisa: te enterás al navegar.')}],
+  [7.6,'a',c=>c.cap('No hay «deshacer» para cambios automáticos, y el registro tampoco los guarda.')],
+  [5.0,'b',c=>{c.b.card('no',3,1,'Notas',['notes'],{cls:'ok'});c.toast.show('Notas abrió un espacio nuevo','Juntar con Terminal');c.cap('Cada cambio automático se anuncia en el momento…')}],
+  [6.6,'b',c=>{c.cur.show(330,180);c.cur.to(286,247,520)}],
+  [7.3,'b',c=>c.cur.click()],
+  [7.6,'b',c=>{c.b.set('no','gone',1);c.b.apps('te',['term','notes']);c.b.thumbs(true);c.b.set('te','ok',1);c.toast.show('Notas quedó junto a Terminal','Deshacer');c.cur.hide();c.cap('…y se corrige o se deshace con un clic. Todo queda en un historial legible.')}],
+  [9.4,'b',c=>{c.b.set('te','ok',0);c.toast.hide()}]]});
+
+/* ---------------- reproductor ---------------- */
+const P={i:0,t:0,n:0,play:true,timers:[],
+ later(f,ms){if(P.instant){f();return}P.timers.push(setTimeout(f,ms))},
+ cap(id,text){const e=document.getElementById(id);if(e.textContent===text)return;if(P.instant){e.textContent=text;return}e.classList.add('sw');P.timers.push(setTimeout(()=>{e.textContent=text;e.classList.remove('sw')},220))},
+ load(i,keep){P.timers.forEach(clearTimeout);P.timers=[];P.i=i;P.t=0;P.n=0;const s=S[i];
+   if(!keep){document.getElementById('ttl').textContent=s.title;document.getElementById('sub').textContent=s.sub;document.getElementById('capA').textContent='';document.getElementById('capB').textContent=''}
+   P.ctx={};for(const[side,st]of[['a','stA'],['b','stB']]){const cv=document.querySelector('#'+st+' .cv');cv.innerHTML='';const c=s.setup(cv,side);c.cap=t=>P.cap(side==='a'?'capA':'capB',t);P.ctx[side]=c}
+   P.steps=s.steps.slice().sort((x,y)=>x[0]-y[0])},
+ run(){while(P.n<P.steps.length&&P.steps[P.n][0]<=P.t){const[,sides,f]=P.steps[P.n++];for(const k of sides)f(P.ctx[k])}},
+ tick(dt){if(!P.play||P.i>=S.length)return;P.t+=dt;P.run();document.getElementById('pg').style.width=Math.min(100,P.t/S[P.i].len*100)+'%';if(P.t>=S[P.i].len)P.load(P.i,true)}};
+
+const tabs=document.getElementById('tabs');
+function select(i){[...tabs.children].forEach((b,k)=>b.setAttribute('aria-selected',k===i));const sc=i===S.length;
+  document.getElementById('play').style.display=sc?'none':'';document.getElementById('score').classList.toggle('on',sc);
+  if(sc){P.i=i;document.getElementById('ttl').textContent='Puntaje de UX/UI: hoy, alternativas y objetivo';document.getElementById('sub').textContent='Promedio simple de 7 dimensiones (1–10) para el trabajo «armar y navegar un setup multi-app». Es criterio propio a partir del código y del comportamiento conocido de cada producto, no una medición con usuarios.';score()}
+  else P.load(i)}
+[...S.map(s=>s.tab),'Puntaje'].forEach((t,i)=>{const b=$('button','',tabs,t);b.type='button';b.setAttribute('role','tab');b.onclick=()=>select(i)});
+document.getElementById('pp').onclick=e=>{P.play=!P.play;e.target.textContent=P.play?'Pausar':'Reproducir'};
+document.getElementById('rs').onclick=()=>{P.load(P.i);P.play=true;document.getElementById('pp').textContent='Pausar'};
+
+const DATA=[['AeroGrid · objetivo del plan',8.3,'goal','Fiabilidad 9 · Navegación 9 · Organización 9 · Aprendizaje 8 · Pulido 8 · Instalación 7 · Teclado 8'],
+ ['Windows 11 nativo (Snap + Escritorios)',7.9,'','Fiabilidad 8 · Navegación 5 · Organización 8 · Aprendizaje 8 · Pulido 8 · Instalación 10 · Teclado 8'],
+ ['macOS nativo (Mission Control, Spaces, mosaico)',7.3,'','Fiabilidad 7 · Navegación 5 · Organización 6 · Aprendizaje 8 · Pulido 9 · Instalación 10 · Teclado 6'],
+ ['Rectangle Pro / Moom',6.9,'','Fiabilidad 8 · Navegación 2 · Organización 7 · Aprendizaje 8 · Pulido 7 · Instalación 8 · Teclado 8'],
+ ['PowerToys FancyZones (Windows)',6.6,'','Fiabilidad 8 · Navegación 3 · Organización 8 · Aprendizaje 6 · Pulido 6 · Instalación 8 · Teclado 7'],
+ ['AeroSpace',5.6,'','Fiabilidad 6 · Navegación 6 · Organización 4 · Aprendizaje 3 · Pulido 3 · Instalación 7 · Teclado 10'],
+ ['AeroGrid · hoy',5.1,'me','Fiabilidad 3 · Navegación 9 · Organización 8 · Aprendizaje 6 · Pulido 6 · Instalación 3 · Teclado 1'],
+ ['yabai + skhd',4.9,'','Fiabilidad 6 · Navegación 6 · Organización 4 · Aprendizaje 2 · Pulido 3 · Instalación 3 · Teclado 10']];
+function score(){const el=document.getElementById('score');el.innerHTML='';
+  for(const[n,v,k,tip]of DATA){const r=$('div','row '+k,el);r.title=tip;$('div','nm',r,n);const tr=$('div','tr',r);const b=$('div','br',tr);$('div','vl',r,v.toFixed(1).replace('.',','));requestAnimationFrame(()=>requestAnimationFrame(()=>b.style.width=v*10+'%'))}
+  $('div','axis',el,'<div></div><div><span>0</span><span>5</span><span>10</span></div><div></div>');
+  $('div','steps',el,'<span><em>Hoy</em> <b>5,1</b></span><i>→</i><span><em>Fase 0 · arreglo</em> <b>5,6</b></span><i>→</i><span><em>Fase 1 · confianza</em> <b>6,3</b></span><i>→</i><span><em>Fase 2 · velocidad</em> <b>7,6</b></span><i>→</i><span><em>Fase 3 · distribución</em> <b>8,3</b></span>');
+  $('p','note',el,'Pasá el cursor por una fila para ver el desglose. Barra rayada = objetivo, todavía no construido.')}
+
+function fit(){for(const id of['stA','stB']){const st=document.getElementById(id),k=st.clientWidth/W;st.style.height=H*k+'px';st.firstElementChild.style.transform=`scale(${k})`}}
+new ResizeObserver(fit).observe(document.getElementById('ag'));fit();
+
+const dbg=document.documentElement.dataset.agDebug;
+if(dbg){const[i,t]=dbg.split(',').map(Number);document.getElementById('ag').classList.add('noanim');P.instant=true;select(i);if(i<S.length){P.t=t;P.run();P.play=false}}
+else{select(0);let last=performance.now();const loop=n=>{P.tick(Math.min(.1,(n-last)/1000));last=n;requestAnimationFrame(loop)};requestAnimationFrame(loop)}
+})();
+</script>
+</body>
+</html>
