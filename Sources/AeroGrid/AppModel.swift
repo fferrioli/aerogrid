@@ -13,6 +13,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var paused = false { didSet { if paused { input.reset() } } }
     @Published private(set) var pauseChanging = false
     private var gate = ReconciliationGate()
+    /// Mirrors the gate for the engine queue, so a background refresh admitted just before a lock skips once it runs.
+    private let reconciliationOpen = LockedFlag(true)
     private var sessionInactive = false
     private var notifiedLocked = false
     private var screensAsleep = false
@@ -254,7 +256,7 @@ final class AppModel: ObservableObject {
         perform(feedback:false,coalesce:true,control:true) { engine in
             do {
                 if syncManagement { try WindowManagerSession.setPaused(desiredPause,backend:self.management) }
-                if !desiredPause { try engine.refresh() }
+                if !desiredPause && self.reconciliationOpen.value { try engine.refresh() }
                 DispatchQueue.main.async { self.managementNeedsSync = false }
             } catch {
                 DispatchQueue.main.async {
@@ -320,6 +322,7 @@ final class AppModel: ObservableObject {
         }
         let wasOpen = gate.isOpen(at: now)
         let reopened = gate.update(locked: locked || sessionInactive, screensAsleep: screensAsleep, at: now)
+        reconciliationOpen.value = gate.isOpen(at: now)
         if let reason = gate.reason, previous != reason { log("gate: closed reason=\(reason)") }
         if reopened { log("gate: open") }
         if wasOpen && !gate.isOpen(at: now) {
@@ -696,6 +699,16 @@ final class AppModel: ObservableObject {
 }
 
 enum ReconciliationDecision { case wait, refresh, recover }
+
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Bool
+    init(_ value: Bool) { stored = value }
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
 
 func reconciliationDecision(open: Bool, reopened: Bool) -> ReconciliationDecision {
     guard open else { return .wait }

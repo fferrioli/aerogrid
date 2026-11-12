@@ -170,17 +170,29 @@ final class FullscreenResilienceTests: XCTestCase {
         XCTAssertTrue(engine.consumeEvents().isEmpty)
     }
 
-    func testBlackoutGuardIsBoundedWhenEveryWindowReallyCloses() throws {
-        var alive = true
-        let (engine, backend) = try fixture(alive: { _ in alive })
+    func testClosingTheLastWindowRemovesItsCardAsSoonAsTheBlackoutGuardEnds() throws {
+        let (engine, backend) = try fixture()
         let link = try XCTUnwrap(engine.map.fullscreens.first)
         backend.setWindows([])
-        alive = false
         for _ in 0..<DynamicEngine.blackoutLimit { try engine.refresh() }
         XCTAssertEqual(engine.map.fullscreens, [link], "an empty inventory is not evidence while the guard holds")
-        XCTAssertEqual(engine.consumeEvents().filter { $0.hasPrefix("inventory-blackout") }.count, DynamicEngine.blackoutLimit)
+        let held = engine.consumeEvents()
+        XCTAssertEqual(held.filter { $0.hasPrefix("inventory-blackout") }.count, DynamicEngine.blackoutLimit)
+        XCTAssertFalse(held.contains { $0.hasPrefix("fullscreen-removed") })
         try engine.refresh()
-        XCTAssertTrue(engine.map.fullscreens.isEmpty, "past the limit the empty inventory is taken as real")
+        XCTAssertTrue(engine.map.fullscreens.isEmpty, "absence counted during the guard removes the card on the next sample")
+        XCTAssertTrue(engine.consumeEvents().contains { $0.hasPrefix("fullscreen-removed reason=closed") })
+        // 2 s poll: (blackoutLimit + 1) samples stay within the 15 s closing bound.
+        XCTAssertLessThanOrEqual((DynamicEngine.blackoutLimit + 1) * 2, 15)
+    }
+
+    func testDeadProcessEndsTheBlackoutImmediately() throws {
+        var alive = true
+        let (engine, backend) = try fixture(alive: { _ in alive })
+        backend.setWindows([])
+        alive = false
+        try engine.refresh()
+        XCTAssertTrue(engine.map.fullscreens.isEmpty)
         XCTAssertTrue(engine.consumeEvents().contains { $0.hasPrefix("fullscreen-removed reason=process-exit") })
     }
 }

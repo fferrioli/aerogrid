@@ -10,9 +10,10 @@ public final class DynamicEngine {
     public static let absenceConfirmations = 3
     public static let exitConfirmations = 2
     public static let maxFullscreenPlaces = 32
-    /// Consecutive empty-inventory samples ignored as a blackout (about 30 s at the 2 s poll). Past this, an empty
-    /// inventory is taken as real (every window closed) and the normal confirmation and place memory apply.
-    public static let blackoutLimit = 15
+    /// Consecutive empty-inventory samples ignored as a blackout (10 s at the 2 s poll). Absence of live fullscreen
+    /// windows keeps counting meanwhile without removing anything, so when every window really closed the cards go
+    /// as soon as the guard ends; a dead owner process ends the blackout at once, since it does not depend on the inventory.
+    public static let blackoutLimit = 5
     private var blackoutSamples = 0
     private let isProcessAlive: (Int32) -> Bool
     private var fullscreenSamples: [WindowIdentity: (absent: Int, windowed: Int)] = [:]
@@ -179,9 +180,19 @@ public final class DynamicEngine {
             }
         }
         if desktop.windows?.isEmpty == true, before?.windows?.isEmpty == false, blackoutSamples < Self.blackoutLimit {
-            blackoutSamples += 1
-            emit("inventory-blackout count=\(blackoutSamples)")
-            return
+            let homes = desktop.windowHomes ?? []
+            let unobserved = map.fullscreens.filter { link in
+                !homes.contains { $0.id == link.identity.id && $0.pid == link.identity.pid && $0.boot == link.identity.boot }
+            }
+            if unobserved.allSatisfy({ isProcessAlive($0.identity.pid) }) {
+                blackoutSamples += 1
+                emit("inventory-blackout count=\(blackoutSamples)")
+                for link in unobserved {
+                    fullscreenSamples[link.identity, default: (0, 0)].absent += 1
+                    emit("fullscreen-doubt kind=absent count=\(fullscreenSamples[link.identity]?.absent ?? 0) \(detail(link.identity, link.spaceID))")
+                }
+                return
+            }
         }
         blackoutSamples = 0
         if let pending = map.pending {
