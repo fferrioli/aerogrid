@@ -630,6 +630,12 @@ final class AppModel: ObservableObject {
             setups[index].name = name
         }
     }
+    func dismissMissingApps() { missingBundleIDs = [] }
+    /// Display name for an app the user is asked to open; shown in the organizer only, never logged.
+    func appDisplayName(bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
     func deleteSetup(id: String) { changeSetups { _, setups in setups.removeAll { $0.id == id } } }
     func openApp(bundleID: String) {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {

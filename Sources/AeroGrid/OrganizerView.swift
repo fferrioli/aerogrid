@@ -6,6 +6,9 @@ struct OverviewView: View {
     @ObservedObject var model: AppModel
     @State private var displayID: String
     @State private var movingSpace: String?
+    @State private var savingSetup = false
+    @State private var renamingSetup: String?
+    @State private var setupName = ""
     @State private var mergingSpace: String?
     @State private var movingWindow: WindowIdentity?
     @State private var detail: Space?
@@ -33,12 +36,50 @@ struct OverviewView: View {
                         .menuStyle(.borderlessButton).fixedSize()
                 } else { Text("Tus espacios").font(.subheadline.weight(.medium)) }
                 Spacer()
+                Menu {
+                    ForEach(model.setups, id: \.id) { setup in
+                        Menu(setup.name) {
+                            Button("Aplicar") { model.applySetup(id: setup.id) }
+                            Button("Renombrar…") { renamingSetup = setup.id; setupName = setup.name }
+                            Button("Borrar", role: .destructive) { model.deleteSetup(id: setup.id) }
+                        }
+                    }
+                    if !model.setups.isEmpty { Divider() }
+                    Button("Guardar setup actual…") { savingSetup = true; setupName = "" }
+                } label: { Image(systemName:"rectangle.stack").frame(width:28,height:26).contentShape(Rectangle()) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Setups: guardá esta organización con un nombre y volvé a ella cuando quieras")
                 Button { model.restorePlaces() } label: { Image(systemName:"square.grid.2x2").frame(width:28,height:26).contentShape(Rectangle()) }
                     .disabled(model.state.dynamicMap?.placeTemplates?.isEmpty != false).help("Restaurar lugares: devuelve cada app a su espacio guardado")
                 Button { model.undoOrganization() } label: { Image(systemName:"arrow.uturn.backward").frame(width:28,height:26).contentShape(Rectangle()) }
                     .disabled(model.state.dynamicMap?.undo.isEmpty != false).help("Deshacer organización")
                 Button { model.closeOverview?(true) } label: { Image(systemName:"xmark").frame(width:26,height:26).contentShape(Rectangle()) }.help("Cerrar")
             }.buttonStyle(.plain)
+            .alert("Guardar setup", isPresented: $savingSetup) {
+                TextField("Nombre", text: $setupName)
+                Button("Guardar") { let name = setupName.trimmingCharacters(in: .whitespaces); if !name.isEmpty { model.saveSetup(name: name) } }
+                Button("Cancelar", role: .cancel) {}
+            } message: { Text("Guarda la ubicación de tus espacios y qué apps van en cada uno.") }
+            .alert("Renombrar setup", isPresented: Binding(get: { renamingSetup != nil }, set: { if !$0 { renamingSetup = nil } })) {
+                TextField("Nombre", text: $setupName)
+                Button("Renombrar") { let name = setupName.trimmingCharacters(in: .whitespaces); if let id = renamingSetup, !name.isEmpty { model.renameSetup(id: id, name: name) } }
+                Button("Cancelar", role: .cancel) {}
+            }
+            if !model.missingBundleIDs.isEmpty {
+                HStack(spacing:8) {
+                    Image(systemName:"app.dashed").foregroundStyle(.secondary)
+                    Text(model.missingBundleIDs.count == 1 ? "Falta abrir una app del setup" : "Faltan abrir \(model.missingBundleIDs.count) apps del setup").font(.caption)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing:6) {
+                            ForEach(model.missingBundleIDs, id: \.self) { bundle in
+                                Button("Abrir \(model.appDisplayName(bundleID: bundle))") { model.openApp(bundleID: bundle) }.controlSize(.small)
+                            }
+                        }
+                    }
+                    Button { model.dismissMissingApps() } label: { Image(systemName:"xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain).help("Ocultar")
+                }
+                .padding(.horizontal,8).padding(.vertical,5)
+                .background(RoundedRectangle(cornerRadius:6).fill(Color.secondary.opacity(0.1)))
+            }
             if movingSpace != nil || movingWindow != nil || mergingSpace != nil {
                 HStack {
                     Text(mergingSpace != nil ? "Elegí dónde fusionar; vas a ver el resultado antes de confirmar" : "Elegí un destino o un + en el mapa").font(.caption)

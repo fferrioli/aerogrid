@@ -84,6 +84,15 @@ import GridCore
             menu.addItem(item)
         }
         add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover)); add("Restaurar lugares", #selector(restorePlaces))
+        if let setups = model?.setups, !setups.isEmpty {
+            let submenu = NSMenu()
+            for setup in setups {
+                let item = NSMenuItem(title: setup.name, action: #selector(applySetupItem(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = setup.id; submenu.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Aplicar setup", action: nil, keyEquivalent: ""); parent.submenu = submenu
+            menu.addItem(parent)
+        }
         add(model?.paused == true ? "Reanudar AeroGrid" : "Pausar AeroGrid", #selector(togglePause))
         menu.addItem(.separator())
         add(updates?.primaryTitle ?? "Buscar actualizaciones…", #selector(updatePrimary))
@@ -219,6 +228,7 @@ import GridCore
     @objc func togglePause() { if let model { model.setPaused(!model.paused) } }
     @objc func recover() { model?.recover() }
     @objc func restorePlaces() { model?.restorePlaces() }
+    @objc func applySetupItem(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { model?.applySetup(id: id) } }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateLater }
