@@ -603,3 +603,36 @@ Los tests del revisor (`testReview…`) son la reproducción de F0-11c y F0-11d.
 **Invariantes.** Las de F0-11a, con una sola excepción: una ventana `.standard` con evidencia `.fullscreen` sí se mueve. Nunca sale de fullscreen una ventana.
 
 **Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado y `git diff --stat`.
+
+---
+
+## F0-12 · Hallazgo de la aceptación: un choque de identidad al plegar detiene el motor
+
+**Qué pasó (2026-11-13, prueba física 1 de F0-9, build `5f8f08e`).** Con la Mac sola (`folded: true`), el usuario abrió una ventana nueva en una app cuya tarjeta externa tenía una sola ventana. La tarjeta pasó a tener dos bloques y `foldExternalSpaces()` intentó crear la hija `derivedIdentity(sourceID: <tarjeta>, component: "block-1")`. Ese workspace (`grid-derived-…`) ya pertenecía a otra tarjeta: una tarjeta con ID UUID que en algún momento adoptó el workspace de un hijo plegado anterior (el 12/11 existía la hija con ID `derived-…`; el 13/11 el mismo workspace era de una tarjeta UUID). El pliegue lanzó `La identidad de un bloque está ocupada por otro espacio`, y como lo hace dentro de `refresh()`, **todo** el refresco abortó cada 2 s: ninguna reconciliación, y todas las acciones del organizador fallaron con el mismo error (`organize` llama primero a `refresh()`). Se destrabó al cerrar la ventana nueva.
+
+**Causa.** Un problema local de una tarjeta (identidad ya tomada) se propaga como excepción y detiene el motor entero. El origen del choque —una tarjeta adoptada que reutiliza el workspace de un hijo plegado— queda registrado como causa conocida; esta tarea no lo cambia.
+
+**Principio del arreglo.** Una tarjeta que no se puede plegar no se pliega, se informa una vez, y el resto del motor sigue.
+
+---
+
+## F0-12a · Controlador: el pliegue no detiene el refresco ante un choque de identidad `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/DynamicEngine.swift` (`foldExternalSpaces`), `Tests/GridCoreTests/DynamicEngineTests.swift`.
+
+**Especificación.**
+1. En `foldExternalSpaces()`, si la identidad derivada de algún bloque (`id` o `workspace`) ya la tiene otro espacio del mapa: no lanzar. Esa fuente no se pliega en este refresco (ningún cambio de mapa, `persist`, movimiento ni `restore` por ella) y el bucle sigue con las demás fuentes.
+2. Emitir `fold-skipped reason=identity-taken space=<prefijo de 8 del id de la fuente> block=<n>` una sola vez mientras dure el choque de esa fuente. La memoria (en el motor, no en el mapa) se limpia para una fuente cuando una evaluación de esa fuente no choca (no hace falta plegarla o se plegó) o la fuente ya no existe.
+3. No cambia nada más: ni `derivedIdentity`, ni la adopción, ni el despliegue.
+
+**Reproducción primero.** Escribir el test 1 y correrlo contra el código actual: debe fallar (hoy `refresh()` lanza). Pegar la salida en rojo.
+
+**Tests nuevos (`DynamicEngineTests`, sobre el fixture de bloques paralelos).**
+1. Antes de desconectar, agregar al mapa un espacio con ID UUID y el workspace de `derivedIdentity(sourceID: external.id, component: "block-1")`. Desconectar y refrescar tres veces: ningún `refresh()` lanza; la fuente no tiene familia y sus ventanas no se movieron; un solo `fold-skipped` en los tres refrescos.
+2. Mismo estado con una segunda fuente externa de dos bloques sin choque: en el mismo refresco, la segunda se pliega como hoy.
+3. En el estado del test 1, una acción del organizador (`createSpace`) funciona.
+4. Si el espacio que choca se borra, el siguiente refresco pliega la fuente como hoy, y un choque posterior vuelve a emitir el evento.
+
+**Invariantes.** Un choque de identidad nunca detiene `refresh()` ni `organize`. Los tests de pliegue existentes siguen en verde sin cambiar aserciones. El evento no lleva títulos ni nombres.
+
+**Verificación.** `swift test --filter DynamicEngineTests`, luego `swift test` completo.
