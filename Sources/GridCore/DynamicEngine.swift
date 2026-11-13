@@ -130,16 +130,22 @@ public final class DynamicEngine {
         if let native = space.nativeWindow { return inventory.filter { $0.identity == native && $0.nativeFullscreen } }
         return inventory.filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
     }
+    private func fullscreenPlace(for identity: WindowIdentity) -> FullscreenPlace? {
+        map.fullscreenPlaces?.first { place in
+            place.space.nativeWindow == identity && map.spaces.contains { $0.workspace == place.space.workspace }
+        }
+    }
     private func readDesktop() throws -> Desktop {
         var desktop = try backend.desktop()
         fullscreenDisagreements.formIntersection(map.fullscreens.map(\.identity))
         desktop.windows = desktop.windows?.map { window in
-            guard let link = map.fullscreens.first(where: { $0.identity == window.identity }) else { return window }
+            let link = map.fullscreens.first { $0.identity == window.identity }
+            guard link != nil || fullscreenPlace(for: window.identity) != nil else { return window }
             guard !window.nativeFullscreen, window.nativeSpace == "fullscreen" else {
-                fullscreenDisagreements.remove(window.identity)
+                if link != nil { fullscreenDisagreements.remove(window.identity) }
                 return window
             }
-            if fullscreenDisagreements.insert(window.identity).inserted {
+            if let link, fullscreenDisagreements.insert(window.identity).inserted {
                 emit("fullscreen-doubt kind=disagree \(detail(window.identity, link.spaceID))")
             }
             var adjusted = window
@@ -197,8 +203,11 @@ public final class DynamicEngine {
         editMap { map in
             map.fullscreenPlaces = map.fullscreenPlaces.map { places in
                 Array(places.filter { place in
-                    guard let identity = place.space.nativeWindow else { return false }
-                    return isProcessAlive(identity.pid) && (knownBoot == nil || identity.boot == knownBoot)
+                    guard let identity = place.space.nativeWindow, fullscreenPlace(for: identity) != nil else { return false }
+                    // Positive normal-Space evidence means the window left fullscreen while it was missing:
+                    // a later fullscreen entry is new and must not pull the window back to the old card.
+                    let leftFullscreen = desktop.windows?.contains { $0.identity == identity && !$0.nativeFullscreen && $0.nativeSpace == "normal" } == true
+                    return !leftFullscreen && isProcessAlive(identity.pid) && (knownBoot == nil || identity.boot == knownBoot)
                 }.sorted { $0.removedAt > $1.removedAt }.prefix(Self.maxFullscreenPlaces))
             }
         }
@@ -315,7 +324,7 @@ public final class DynamicEngine {
         guard let desktop = observed else { return }
         // Known fullscreen windows keep their mapped home even if the inventory reports another workspace.
         let linked = Set(map.fullscreens.map(\.identity))
-        let discoverable = windows.filter { !$0.nativeFullscreen || !linked.contains($0.identity) }
+        let discoverable = windows.filter { fullscreenPlace(for: $0.identity) == nil && (!$0.nativeFullscreen || !linked.contains($0.identity)) }
         for workspace in Set(discoverable.map(\.workspace)).union(desktop.visible.values).sorted() where !map.spaces.contains(where: { $0.workspace == workspace }) {
             guard workspace.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { continue }
             let window = discoverable.first { $0.workspace == workspace }
@@ -362,15 +371,10 @@ public final class DynamicEngine {
         }
         throw GridError.invalid("No se pudo asignar una identidad al fullscreen")
     }
-    private func reconcileFullscreen(previous: Desktop?) throws {
-        let rememberedIdentities = Set((map.fullscreenPlaces ?? []).compactMap { $0.space.nativeWindow })
-        fullscreenReturnFailures.formIntersection(rememberedIdentities)
-        fullscreenUnplaced.formIntersection(Set(windows.map(\.identity)))
-        var failedReturns: Set<WindowIdentity> = []
+    private func returnRememberedFullscreens(failedReturns: inout Set<WindowIdentity>) -> Bool {
         var returned = false
         for window in windows where window.nativeFullscreen && !map.fullscreens.contains(where: { $0.identity == window.identity }) {
-            guard let place = map.fullscreenPlaces?.first(where: { $0.space.nativeWindow == window.identity }),
-                  map.spaces.contains(where: { $0.workspace == place.space.workspace }),
+            guard !failedReturns.contains(window.identity), let place = fullscreenPlace(for: window.identity),
                   window.workspace != place.space.workspace else { continue }
             do {
                 try backend.moveFullscreen(window: window.identity, workspace: place.space.workspace)
@@ -384,7 +388,17 @@ public final class DynamicEngine {
                 }
             }
         }
-        if returned { sync(try readDesktop()) }
+        return returned
+    }
+    private func reconcileFullscreen(previous: Desktop?) throws {
+        let rememberedIdentities = Set((map.fullscreenPlaces ?? []).compactMap { place -> WindowIdentity? in
+            guard let identity = place.space.nativeWindow, fullscreenPlace(for: identity) != nil else { return nil }
+            return identity
+        })
+        fullscreenReturnFailures.formIntersection(rememberedIdentities)
+        fullscreenUnplaced.formIntersection(Set(windows.map(\.identity)))
+        var failedReturns: Set<WindowIdentity> = []
+        if returnRememberedFullscreens(failedReturns: &failedReturns) { sync(try readDesktop()) }
         // Entries are matched by owner and boot, not a reusable window number alone.
         for link in map.fullscreens {
             guard let space = map.spaces.first(where: { $0.id == link.spaceID }) else { continue }
@@ -469,8 +483,11 @@ public final class DynamicEngine {
             }
         }
         sync(try readDesktop())
+        if returnRememberedFullscreens(failedReturns: &failedReturns) { sync(try readDesktop()) }
         for window in windows where window.nativeFullscreen && !map.fullscreens.contains(where: { $0.identity == window.identity }) {
             guard !failedReturns.contains(window.identity) else { continue }
+            let remembered = fullscreenPlace(for: window.identity)
+            guard remembered == nil || remembered?.space.workspace == window.workspace else { continue }
             guard let home = map.spaces.first(where: { $0.workspace == window.workspace && $0.nativeWindow == nil }) else {
                 if let owner = map.spaces.first(where: { $0.workspace == window.workspace }),
                    fullscreenUnplaced.insert(window.identity).inserted {
@@ -479,7 +496,6 @@ public final class DynamicEngine {
                 continue
             }
             let original = try snapshot(home)
-            let remembered = map.fullscreenPlaces?.first { $0.space.nativeWindow == window.identity }
             let ownHome = remembered?.space.id == home.id
             let shared = (remembered != nil && !ownHome) || windows.contains { $0.workspace == window.workspace && $0.identity != window.identity }
             var exclusive = home
@@ -964,6 +980,8 @@ public final class DynamicEngine {
                         }
                     }
                     map.spaces.removeAll { $0.id == id }; map.layouts.removeValue(forKey:id)
+                    // Keep the deleted map stable across the next refresh's place pruning.
+                    map.fullscreenPlaces?.removeAll { place in !map.spaces.contains { $0.workspace == place.space.workspace } }
                     map.cursors = map.cursors.filter { $0.value != id }
                     map.connectedCursors = map.connectedCursors.filter { $0.value != id }
                     map.anchors = map.anchors?.filter { $0.value.spaceID != id }

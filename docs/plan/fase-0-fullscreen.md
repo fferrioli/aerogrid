@@ -562,6 +562,7 @@ Los cinco se reprodujeron con un test que falla sobre `73d2dde`.
 | 3 | La ventana recordada vuelve con `nativeFullscreen: false` y `nativeSpace: "fullscreen"`: el ajuste de F0-10c solo cubre vínculos, así que cuenta como intrusa normal y parte la tarjeta ajena | F0-11c (controlador) y F0-11d (el backend acepta moverla) |
 | 4 | Si el usuario borró la tarjeta mientras la ventana faltaba y la ventana vuelve a un workspace con hogar libre, la tarjeta borrada resucita con `fullscreen-restored` | F0-11c |
 | 5 | Si vuelve a un workspace que el mapa no conoce, `adoptUnmappedWorkspaces` crea una tarjeta antes del retorno y queda una tarjeta dormida de más | F0-11c |
+| 6 | (Del orquestador, al revisar F0-11c.) Si la ventana recordada vuelve como **normal** con evidencia positiva (`nativeSpace: "normal"`, el usuario salió de fullscreen mientras faltaba), el lugar sigue vivo y una entrada posterior a fullscreen la arrastra a la tarjeta vieja | Arreglo chico del orquestador: la poda descarta el lugar ante esa evidencia. Test `testPlaceExpiresWhenWindowReturnsAsNormalWindow`, 4 fallas antes del cambio |
 
 Los tests del revisor (`testReview…`) son la reproducción de F0-11c y F0-11d.
 
