@@ -102,9 +102,9 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F1-0b Instalador: firma con identidad y reinicio TCC por DR | SUB-impl | hecho | | 2026-11-13 |
 | F1-0c Docs y verificación en vivo | ORQ + HUM | hecho | | 2026-11-13 |
 | F1-1 Lugares por app: diseño | ORQ | hecho | | 2026-11-13 |
-| F1-1b Plantillas y emparejador puro | SUB-impl | en curso | | |
-| F1-1c Backend: marca `ruled` | SUB-impl | en curso | | |
-| F1-1a Captura de plantillas | SUB-impl | pendiente | | |
+| F1-1b Plantillas y emparejador puro | SUB-impl | hecho | | 2026-11-13 |
+| F1-1c Backend: marca `ruled` | SUB-impl | hecho | | 2026-11-13 |
+| F1-1a Captura de plantillas | SUB-impl | en curso | | |
 | F1-1d Aplicación, ventana de inicio de sesión y «Restaurar lugares» | SUB-impl + ORQ | pendiente | | |
 | F1-2 Setups con nombre: diseño | ORQ | hecho | | 2026-11-13 |
 | F1-3 … F1-7 | ver fase 1 | pendiente | | |

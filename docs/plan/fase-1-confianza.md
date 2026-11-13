@@ -202,3 +202,30 @@ Diseño en `docs/plan/decisiones/F1-1.md`. Orden: F1-1b y F1-1c en paralelo; des
 **Tests.** Regla con `if.app-id` y `move-node-to-workspace` ⇒ `ruled` en esa ventana y no en otra; regla sin `move-node-to-workspace` ⇒ sin `ruled`; regla con condición de título ⇒ según la elección del punto 2.
 
 **Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado.
+
+### F1-1a · Captura de plantillas en el mapa `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/SpaceMap.swift` (campo), `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/PlaceTemplateCaptureTests.swift` (nuevo). Usa los tipos de `Sources/GridCore/PlaceTemplate.swift` (F1-1b, no se modifica salvo que falte algo: detenerse e informar).
+
+**Especificación.**
+1. `SpaceMap.placeTemplates: [String: PlaceTemplate]? = nil`. Un `state.json` sin el campo se decodifica igual.
+2. **Captura en `captureVisibleLayouts`.** Cada vez que guarda una distribución para un espacio, deriva `PlaceTemplate.capture(snapshot:windows:now:)` con el inventario actual y aplica la regla de reemplazo:
+   - plantilla nueva `nil` ⇒ conservar la anterior;
+   - si hay anterior y el multiconjunto de bundles de la nueva es **subconjunto estricto** del de la anterior ⇒ conservar la anterior (contracción por cierre, típica del apagado);
+   - en otro caso ⇒ reemplazar.
+3. **Organización del usuario.** Después de cada `organize(...)` exitoso, reconstruir sin la regla de contracción las plantillas de los espacios cuyo contenido o distribución cambió en esa acción (comparar antes/después). Undo/redo de organización también reconstruye.
+4. **Tarjeta fullscreen de hogar propio** (`nativeWindow != nil` y vínculo con `spaceID == homeID`): plantilla `PlaceTemplate.fullscreen(slot:)` con el bundle de su ventana y ordinal = posición de esa ventana entre las ventanas fullscreen de ese bundle con hogar propio, por ID ascendente. Las tarjetas fullscreen exclusivas no tienen plantilla (límite conocido: se borran al cerrar su ventana).
+5. **Poda.** Al principio de `refresh()`, borrar plantillas de espacios que ya no existen.
+6. No se captura nada si el inventario no tiene ventanas; no se agregan eventos; nada de títulos.
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`PlaceTemplateCaptureTests`).**
+1. Un espacio con dos ventanas de una app y una de otra: tras `refresh()`, la plantilla tiene esas ranuras y sobrevive a reconstruir el motor con un `boot` distinto.
+2. Contracción por cierre: se cierra una ventana ⇒ la plantilla no cambia; una ventana nueva de otra app ⇒ se reemplaza.
+3. Reordenar por organización del usuario con menos ventanas ⇒ se reemplaza (sin regla de contracción).
+4. Tarjeta fullscreen de hogar propio ⇒ plantilla `fullscreen`; exclusiva ⇒ sin plantilla.
+5. Borrar un espacio ⇒ su plantilla desaparece en el siguiente refresco.
+6. Estado sin `placeTemplates` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
+
+**Verificación.** `swift test --filter PlaceTemplateCaptureTests`, luego `swift test`.
