@@ -586,7 +586,7 @@ final class AppModel: ObservableObject {
         guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
         var count = 0
         perform(completion: { [weak self] error in
-            if error == nil { self?.message = "Lugares restaurados · \(count) ventana(s) movida(s)" }
+            if error == nil { self?.message = count == 0 ? "Todo está en su lugar" : count == 1 ? "Una ventana volvió a su lugar" : "\(count) ventanas volvieron a su lugar" }
         }) { engine in
             guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
             count = try engine.restorePlaces()

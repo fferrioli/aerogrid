@@ -83,7 +83,7 @@ import GridCore
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self
             menu.addItem(item)
         }
-        add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover))
+        add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover)); add("Restaurar lugares", #selector(restorePlaces))
         add(model?.paused == true ? "Reanudar AeroGrid" : "Pausar AeroGrid", #selector(togglePause))
         menu.addItem(.separator())
         add(updates?.primaryTitle ?? "Buscar actualizaciones…", #selector(updatePrimary))
@@ -218,6 +218,7 @@ import GridCore
     }
     @objc func togglePause() { if let model { model.setPaused(!model.paused) } }
     @objc func recover() { model?.recover() }
+    @objc func restorePlaces() { model?.restorePlaces() }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateLater }

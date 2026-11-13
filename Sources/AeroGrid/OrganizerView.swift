@@ -33,6 +33,8 @@ struct OverviewView: View {
                         .menuStyle(.borderlessButton).fixedSize()
                 } else { Text("Tus espacios").font(.subheadline.weight(.medium)) }
                 Spacer()
+                Button { model.restorePlaces() } label: { Image(systemName:"square.grid.2x2").frame(width:28,height:26).contentShape(Rectangle()) }
+                    .disabled(model.state.dynamicMap?.placeTemplates?.isEmpty != false).help("Restaurar lugares: devuelve cada app a su espacio guardado")
                 Button { model.undoOrganization() } label: { Image(systemName:"arrow.uturn.backward").frame(width:28,height:26).contentShape(Rectangle()) }
                     .disabled(model.state.dynamicMap?.undo.isEmpty != false).help("Deshacer organización")
                 Button { model.closeOverview?(true) } label: { Image(systemName:"xmark").frame(width:26,height:26).contentShape(Rectangle()) }.help("Cerrar")
