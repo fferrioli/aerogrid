@@ -266,7 +266,7 @@ Diseño en `docs/plan/decisiones/F1-2.md`. F1-2a (lógica) es de subagente; las 
 
 ### F1-2a · Setups: guardar y aplicar `[SUB-impl]` · tamaño M
 
-**Archivos.** `Sources/GridCore/Setups.swift` (nuevo), `Sources/GridCore/DynamicEngine.swift`, `Sources/AeroGrid/AppModel.swift` (solo cablear), `Tests/GridCoreTests/SetupTests.swift` (nuevo).
+**Archivos.** `Sources/GridCore/Setups.swift` (nuevo), `Sources/GridCore/DynamicEngine.swift`, `Sources/GridCore/SpaceMap.swift` (solo `MapCheckpoint.placeTemplates` opcional: Deshacer y la recuperación de `PendingOrganization` deben restituir también las plantillas; un checkpoint sin el campo se decodifica igual), `Sources/AeroGrid/AppModel.swift` (solo cablear), `Tests/GridCoreTests/SetupTests.swift` (nuevo).
 
 **Especificación.**
 1. Tipos `Codable`/`Equatable`: `Setup { id: String; name: String; createdAt: Date; spaces: [SetupSpace] }`, `SetupSpace { spaceID; name; rect: SpaceRect; foldedRect: SpaceRect?; boardID: String?; preferredRole: String; workspace: String; template: PlaceTemplate? }`. Persistencia en `setups.json` del directorio de soporte con el `Store` existente (escritura atómica); archivo ausente = lista vacía. Nunca dentro de `state.json`.
