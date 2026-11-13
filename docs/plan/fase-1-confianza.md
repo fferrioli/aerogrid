@@ -229,3 +229,31 @@ Diseño en `docs/plan/decisiones/F1-1.md`. Orden: F1-1b y F1-1c en paralelo; des
 6. Estado sin `placeTemplates` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
 
 **Verificación.** `swift test --filter PlaceTemplateCaptureTests`, luego `swift test`.
+
+### F1-1d · Aplicar lugares al iniciar sesión y con «Restaurar lugares» `[SUB-impl]` · tamaño L
+
+**Archivos.** `Sources/GridCore/SpaceMap.swift` (`WindowInfo.ruled`, estado persistido), `Sources/GridCore/Engine.swift` (protocolo), `Sources/GridCore/DynamicEngine.swift`, `Sources/AeroGrid/Backend.swift`, `Sources/AeroGrid/LoginSession.swift` (nuevo), `Sources/AeroGrid/AppModel.swift` (solo cablear: deadline, acción externa y método público; las vistas las hace el orquestador), `Tests/GridCoreTests/PlaceRestoreTests.swift` (nuevo).
+
+**Especificación.**
+1. `WindowInfo.ruled: Bool?`, último parámetro del `init` con default `nil`; se decodifica de `status`.
+2. `Backend.enterFullscreen(window: WindowIdentity) throws`, default en la extensión que no hace nada; `AeroSpaceBackend` ejecuta `macos-native-fullscreen on --window-id <id>`.
+3. Estado persistido en `SpaceMap.placeRestore: PlaceRestoreState?` = `{ boot: String; restored: [WindowIdentity]; userPlaced: [WindowIdentity] }`. Si el `boot` del inventario difiere, se reemplaza por uno vacío para el arranque nuevo.
+4. **Seguimiento.** El motor recuerda el workspace de cada ventana entre refrescos (en memoria). Si una ventana cambia de workspace sin que lo haya movido la restauración ni un `organize` del motor, su identidad pasa a `userPlaced`. Movimientos de `organize` también la agregan (son del usuario).
+5. **Automático.** `DynamicEngine.placeRestoreDeadline: Date?` (lo fija `AppModel`) y reloj inyectable (`now: () -> Date`, default `Date.init`, parámetro del `init` con default). En `refresh()`, después de reconciliar fullscreen y antes de capturar distribuciones, si `now() < deadline`: candidatas = ventanas no `ruled`, no `nativeFullscreen`, sin vínculo fullscreen, no `restored`, no `userPlaced`. Objetivos = espacios con plantilla, en orden de `map.spaces` (los dormidos incluidos; una tarjeta fullscreen de hogar propio usa su workspace). `present` = todo el inventario. `PlaceMatcher.assign`.
+6. **Aplicar cada asignación:** si la ventana está en otro workspace, `moveVerified`; agregar la identidad a `restored` (también si falla, para no reintentar); emitir `place-restored window=<id> pid=<pid> space=<prefijo 8> ordinal=<n>` o `place-restore-failed …` con el mismo detalle (sin bundle ID ni nombres). Si `fullscreen`, después del movimiento `enterFullscreen` una vez. Al terminar el lote, para cada espacio no fullscreen que recibió asignaciones: armar el mapeo ranura → ventana con las ventanas de ese workspace (por bundle, en orden de ID) y `backend.restore(workspace:snapshot:)` con `template.instantiate(…)`; si falla, registrar y seguir. Después `sync(try readDesktop())`.
+7. **Manual:** `public func restorePlaces() throws -> Int` dentro de `organize("Restaurar lugares")` (un solo paso de Deshacer), sin plazo, con candidatas = ventanas no `ruled`, sin vínculo fullscreen y no `userPlaced`; devuelve la cantidad de ventanas movidas. Las identidades movidas van a `restored`.
+8. `LoginSession.consoleLoginDate() -> Date?`: lee `utmpx` (`USER_PROCESS`, `ut_line == "console"`, usuario actual) y devuelve la más reciente. `AppModel` fija `placeRestoreDeadline = login + 300 s` si `now < login + 300 s`; si no, `nil`. Acción externa `restore-places` y método `restorePlaces()` que deja un mensaje con la cantidad.
+9. Nada de esto corre con la compuerta cerrada (el motor no refresca entonces).
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`PlaceRestoreTests`, con reloj y backend falsos).**
+1. Arranque nuevo con plantillas guardadas: aparecen ventanas de esas apps en un workspace cualquiera dentro del plazo ⇒ quedan en sus espacios con su distribución (`restore` con IDs nuevos) y eventos `place-restored`.
+2. Fuera del plazo ⇒ nada se mueve; `restorePlaces()` las mueve y un `undo()` las devuelve.
+3. Una ventana restaurada que el usuario mueve después no vuelve en el siguiente refresco (ni por automático ni por manual).
+4. Ventana `ruled` ⇒ nunca se mueve.
+5. Falla de `moveVerified` ⇒ `place-restore-failed`, sin reintento.
+6. Ranura fullscreen ⇒ `enterFullscreen` una sola vez.
+7. Estado sin `placeRestore` ni `ruled` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
+
+**Verificación.** `swift test --filter PlaceRestoreTests`, luego `swift test`; `zsh scripts/build.sh` compila la app.
