@@ -2,6 +2,20 @@
 import Common
 import XCTest
 
+private final class GridStatusTestApp: AbstractApp {
+    let pid: Int32 = 123
+    let rawAppBundleId: String? = "test.other-app"
+    let name: String? = "Other Application"
+    let execPath: String? = nil
+    let bundlePath: String? = nil
+
+    @MainActor func getFocusedWindow(_ cm: CancellationMode) -> Window? { nil }
+}
+
+private final class GridStatusTestWindow: Window {
+    override func getTitle(_ cm: CancellationMode) async throws -> String { "" }
+}
+
 @MainActor final class GridLayoutCommandTest: XCTestCase {
     override func setUp() async throws { setUpWorkspacesForTests() }
     private func execute(_ args: [String]) async -> CmdIoImpl {
@@ -664,9 +678,117 @@ import XCTest
         }
     }
 
+    private func configureStatusRules(_ rules: String) {
+        let parsed = parseConfig("on-window-detected = [\(rules)]")
+        XCTAssertEqual(parsed.strErrors, [])
+        config.onWindowDetected = parsed.config.onWindowDetected
+    }
+
+    private func statusInventory(ownsBackendUI: Bool = true) async throws -> [[String: Any]] {
+        let command = try XCTUnwrap(parseCommand(["grid-layout", "status"]).cmdOrDie as? GridLayoutCommand)
+        let io = CmdIoImpl(stdin: .emptyStdin)
+        let result = await command.run(.defaultEnv, io, ownsBackendUI: ownsBackendUI)
+        XCTAssertEqual(result, .succ)
+        XCTAssertTrue(io.stderr.isEmpty)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(io.stdout.joined().utf8)) as? [String: Any])
+        return try XCTUnwrap(value["windows"] as? [[String: Any]])
+    }
+
+    func testStatusMarksOnlyAppIDMatchedWorkspaceMoveRules() async throws {
+        let workspace = Workspace.get(byName: name)
+        TestWindow.new(id: 1, parent: workspace.rootTilingContainer)
+        let other = GridStatusTestWindow(id: 2, GridStatusTestApp(), lastFloatingSize: nil,
+            parent: workspace.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        configureStatusRules("""
+            { if.app-id = 'bobko.AeroSpace.test-app', run = ['layout floating', 'move-node-to-workspace ruled'] }
+            """)
+
+        let inventory = try await statusInventory()
+        XCTAssertEqual(inventory.count, 2)
+        let matched = try XCTUnwrap(inventory.first { ($0["id"] as? NSNumber)?.uint32Value == 1 })
+        let unmatched = try XCTUnwrap(inventory.first { ($0["id"] as? NSNumber)?.uint32Value == other.windowId })
+        XCTAssertEqual(matched["ruled"] as? Bool, true)
+        XCTAssertNil(unmatched["ruled"])
+        XCTAssertEqual(workspace.rootTilingContainer.children.count, 2)
+        XCTAssertTrue(workspace.floatingWindowsContainer.children.isEmpty)
+        XCTAssertTrue(other.nodeWorkspace === workspace)
+    }
+
+    func testStatusDoesNotMarkRulesWithoutWorkspaceMove() async throws {
+        TestWindow.new(id: 1, parent: Workspace.get(byName: name).rootTilingContainer)
+        configureStatusRules("""
+            { if.app-id = 'bobko.AeroSpace.test-app', run = ['layout floating'] }
+            """)
+        let inventory = try await statusInventory()
+        XCTAssertEqual(inventory.count, 1)
+        XCTAssertNil(inventory[0]["ruled"])
+    }
+
+    func testStatusConservativelyMarksTitleCondition() async throws {
+        TestWindow.new(id: 1, parent: Workspace.get(byName: name).rootTilingContainer)
+        configureStatusRules("""
+            { if.app-id = 'bobko.AeroSpace.test-app', if.window-title-regex-substring = '^unmatched-title$',
+              run = 'move-node-to-workspace ruled' }
+            """)
+        let inventory = try await statusInventory()
+        XCTAssertEqual(inventory.count, 1)
+        XCTAssertEqual(inventory[0]["ruled"] as? Bool, true)
+    }
+
+    func testStatusRespectsCaseInsensitiveAppNameCondition() async throws {
+        TestWindow.new(id: 1, parent: Workspace.get(byName: name).rootTilingContainer)
+        for (pattern, expected) in [("AEROSPACE.TEST-APP", true), ("other-app", false)] {
+            configureStatusRules("""
+                { if.app-name-regex-substring = '\(pattern)', run = 'move-node-to-workspace ruled' }
+                """)
+            let inventory = try await statusInventory()
+            XCTAssertEqual(inventory.count, 1)
+            if expected {
+                XCTAssertEqual(inventory[0]["ruled"] as? Bool, true)
+            } else {
+                XCTAssertNil(inventory[0]["ruled"])
+            }
+        }
+    }
+
+    func testStatusConservativelyIgnoresWorkspaceAndStartupConditions() async throws {
+        TestWindow.new(id: 1, parent: Workspace.get(byName: name).rootTilingContainer)
+        configureStatusRules("""
+            { if.app-id = 'bobko.AeroSpace.test-app', if.workspace = 'other-workspace',
+              if.during-aerospace-startup = true, run = 'move-node-to-workspace ruled' }
+            """)
+        let inventory = try await statusInventory()
+        XCTAssertEqual(inventory.count, 1)
+        XCTAssertEqual(inventory[0]["ruled"] as? Bool, true)
+    }
+
+    func testStatusConservativelyMarksCommandConditionWithoutExecutingIt() async throws {
+        let workspace = Workspace.get(byName: name)
+        let window = TestWindow.new(id: 1, parent: workspace.rootTilingContainer)
+        configureStatusRules("""
+            { if = 'move-node-to-workspace matcher-must-not-run', run = 'move-node-to-workspace ruled' }
+            """)
+        let inventory = try await statusInventory()
+        XCTAssertEqual(inventory.count, 1)
+        XCTAssertEqual(inventory[0]["ruled"] as? Bool, true)
+        XCTAssertTrue(window.nodeWorkspace === workspace)
+        XCTAssertFalse(Workspace.all.contains { $0.name == "matcher-must-not-run" || $0.name == "ruled" })
+    }
+
+    func testStandaloneStatusOmitsRuled() async throws {
+        TestWindow.new(id: 1, parent: Workspace.get(byName: name).rootTilingContainer)
+        configureStatusRules("""
+            { if.app-id = 'bobko.AeroSpace.test-app', run = 'move-node-to-workspace ruled' }
+            """)
+        let inventory = try await statusInventory(ownsBackendUI: false)
+        XCTAssertEqual(inventory.count, 1)
+        XCTAssertNil(inventory[0]["ruled"])
+    }
+
     func testDeferredInventoryIncludesFullscreenNativeSpace() {
         let home = GridWindowHome(id: 99, pid: 4, boot: "test", workspace: "grid-home", floating: false)
         let deferred = GridDeferredNativeWindow(home: home, monitor: 1, appName: "", bundleID: "")
         XCTAssertEqual(deferred.inventory["nativeSpace"] as? String, "fullscreen")
+        XCTAssertNil(deferred.inventory["ruled"])
     }
 }
