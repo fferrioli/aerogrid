@@ -35,6 +35,8 @@ AeroGrid is a native macOS menu bar app built around a bundled, modified [AeroSp
 | 🖥️ **Work across displays** | Navigate only the display under your pointer or move all displays together. Each connected display has its own board. |
 | 🔌 **Unplug without losing your place** | Parallel app groups become neighboring spaces on the laptop. Existing stacks stay together. Reconnect to restore unchanged groups. |
 | 🔲 **Organize fullscreen apps** | An app entering native fullscreen gets a neighboring destination when it was sharing a space. Drag its card to an empty space or **+** on the same display without moving other apps. |
+| 🔁 **Your setup comes back after a restart** | Each space remembers which apps go there and how they were arranged. For a few minutes after you log in, reopened apps return to their spaces automatically; later, **Restaurar lugares** in the organizer or the menu does it on demand, as one undoable step. Apps placed by your own `on-window-detected` rules are left alone. |
+| 🗂️ **Named setups** | Save the current organization with a name from the organizer, then apply it from the organizer or the menu bar. Applying moves open apps to their saved spaces in one undoable step, leaves everything else where it is, and offers to open missing apps. |
 | 🔄 **Update from the menu** | Get an update indicator, prepare the update in the background, and install with one click. |
 
 ## 🧑‍💻 A typical workflow

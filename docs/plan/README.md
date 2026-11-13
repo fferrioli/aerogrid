@@ -101,7 +101,18 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F1-0a `setup-signing.py` | SUB-impl | hecho | | 2026-11-13 |
 | F1-0b Instalador: firma con identidad y reinicio TCC por DR | SUB-impl | hecho | | 2026-11-13 |
 | F1-0c Docs y verificación en vivo | ORQ + HUM | hecho | | 2026-11-13 |
-| F1-1 … F1-7 | ver fase 1 | pendiente | | |
+| F1-1 Lugares por app: diseño | ORQ | hecho | | 2026-11-13 |
+| F1-1b Plantillas y emparejador puro | SUB-impl | hecho | | 2026-11-13 |
+| F1-1c Backend: marca `ruled` | SUB-impl | hecho | | 2026-11-13 |
+| F1-1a Captura de plantillas | SUB-impl | hecho | | 2026-11-13 |
+| F1-1d Aplicación, ventana de inicio de sesión y «Restaurar lugares» | SUB-impl + ORQ | hecho (simulado) | | 2026-11-13 |
+| F1-1 Revisión independiente | SUB-rev | hecho (3 hallazgos → F1-1e) | | 2026-11-13 |
+| F1-1e Correcciones de la revisión | SUB-impl | hecho (simulado) | | 2026-11-13 |
+| F1-2 Setups con nombre: diseño | ORQ | hecho | | 2026-11-13 |
+| F1-2a Setups: guardar y aplicar | SUB-impl | hecho (simulado) | | 2026-11-13 |
+| F1-2b Vistas de setups | ORQ | hecho (simulado) | | 2026-11-13 |
+| F1-1/F1-2 Instalación y aceptación física (reinicio real) | ORQ + HUM | pendiente (lunes) | | |
+| F1-3 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
 | F3-1 … F3-5 | ver fase 3 | pendiente | | |
 
