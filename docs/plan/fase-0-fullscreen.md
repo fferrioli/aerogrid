@@ -341,3 +341,91 @@ El orquestador verifica cada hallazgo antes de actuar: un revisor también se eq
    | Uso normal de uno o dos días, noche incluida, con la sonda de F0-1 corriendo | I1. Es seguimiento: no bloquea el merge |
 
 7. **PR.** Descripción con: la salida en rojo de la reproducción de F0-3, lista de tests agregados y adaptados, qué es simulado, qué es inyectado en vivo y qué es físico, los resultados de las dos tablas, y las respuestas de F0-1 si ya hay un registro. Merge cuando pasaron las tres pruebas de inyección y las tres primeras físicas. Si el seguimiento falla, se reabre con el registro de la sonda.
+
+---
+
+## F0-10 · Hallazgo de la aceptación: salida de fullscreen falsa
+
+**Qué pasó (2026-11-13, inyección en vivo, prueba 1 de F0-9).** `debug-blind` 30 s con `forget:false` sobre una sola ventana fullscreen. El refresco completo que la operación programa sacó del contenedor fullscreen del backend a **las dos** ventanas fullscreen, también a la no cegada. El controlador registró `fullscreen-doubt kind=windowed` y, 2 s después, `fullscreen-exit` para ambas. La no cegada tenía la tarjeta movida a mano (`manuallyEdited`): el camino de salida la mudó con `moveVerified` a un workspace nuevo y convirtió su casillero en un espacio normal. macOS la sigue teniendo en fullscreen (dos Spaces tipo 4 en `native-status`).
+
+**Causa.**
+1. Para una ventana fullscreen en un Space no visible, Accesibilidad no confirma el fullscreen: `MacWindow.isMacosFullscreen` compara `Bool?` con `true`, así que un fallo de lectura AX vale `false`. La ventana no cegada sigue hoy clasificada «no fullscreen», o sea que la lectura falsa persiste.
+2. F0-6 rescata esa ventana en **cada** refresco completo con `gridNativeMonitor(windowID:) != nil`. Esa consulta da `nil` ante cualquier fallo (Spaces de la pantalla, Spaces de la ventana, o el emparejamiento del display por UUID con `sortedMonitorInfos`), y un solo `nil` saca a la ventana del contenedor para siempre. Que fallara para las dos a la vez apunta a una falla común (pantallas o emparejamiento), no a cada ventana.
+3. El controlador confirma la salida con dos muestras, pero las dos salen del mismo estado persistente del backend: no son evidencia independiente.
+
+Hay además un camino lateral: una ventana fullscreen recolectada (hogar retenido) que se re-registra como `.standard` vuelve como ventana normal en `gridApplyRecoveredWindowHome`, sin consultar WindowServer.
+
+**Principio del arreglo.** La evidencia de WindowServer solo **conserva** un fullscreen ya conocido; nunca lo **crea**. Salir de fullscreen exige evidencia positiva de un Space normal o un período acotado sin evidencia. Dos tareas en paralelo (directorios disjuntos), con el mismo contrato: cada ventana de `grid-layout status` lleva `"nativeSpace": "fullscreen" | "normal" | "unknown"`.
+
+---
+
+## F0-10a · Backend: evidencia nativa de tres estados `[SUB-impl]` · tamaño M
+
+**Archivos.** `vendor/AeroSpace/Sources/AppBundle/command/impl/GridNativeSpaces.swift`, `vendor/AeroSpace/Sources/AppBundle/normalizeLayoutReason.swift`, `vendor/AeroSpace/Sources/AppBundle/command/impl/GridLayoutCommand.swift` (`status()` y `gridApplyRecoveredWindowHome`), `vendor/AeroSpace/Sources/AppBundleTests/GridFullscreenExitTest.swift`, y si hace falta `vendor/AeroSpace/Sources/AppBundleTests/command/GridLayoutCommandTest.swift`. Parche regenerado con `scripts/regenerate-backend-patch.sh` y `UPSTREAM.md`.
+
+**Especificación.**
+
+1. **Clasificador puro** en `GridNativeSpaces.swift`:
+   ```swift
+   enum GridNativeSpaceKind: String { case fullscreen, normal, unknown }
+   func gridClassifyNativeSpace(windowSpaces: [UInt64]?, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind
+   ```
+   - `displays == nil`, `windowSpaces == nil` o vacío ⇒ `.unknown`.
+   - Algún Space de la ventana que no figura en ninguna pantalla ⇒ `.unknown`.
+   - Todos figuran y **todos** son tipo 4 ⇒ `.fullscreen`.
+   - Todos figuran y al menos uno no es tipo 4 ⇒ `.normal` (una ventana «en todos los escritorios» no es fullscreen).
+   - No depende del emparejamiento de monitores. `gridNativeMonitor(windowID:)` queda como está, solo para saber el monitor.
+   - Envoltura `@MainActor func gridNativeSpaceKind(windowID: UInt32, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind` que lee `AeroGridCopyWindowSpaces`. Variante sin `displays` que llama a `nativeDisplays()` una vez.
+
+2. **Salida con evidencia positiva.** En `_normalizeLayoutReason`, rama `.macos`, el parámetro `corroborateFullscreen: (UInt32) -> Bool` pasa a `nativeSpaceKind: (UInt32) -> GridNativeSpaceKind` (default: la envoltura) más `now: TimeInterval` (default `ProcessInfo.processInfo.systemUptime`). Con backend propio, ventana en `MacosFullscreenWindowsContainer` y AX que no dice fullscreen, minimizada ni oculta:
+   - `.fullscreen` ⇒ conservar.
+   - `.normal` ⇒ salir por el camino actual (`exitMacOsNativeUnconventionalState`).
+   - `.unknown` ⇒ conservar mientras el desconocimiento continuo de **esa** ventana dure menos de `gridFullscreenUnknownGrace = 10` s; al llegar, salir. Estado en memoria en un tipo puro (`GridFullscreenUnknownTracker`: `mutating func shouldExit(windowID:now:) -> Bool`, `clear(windowID:)`), tope de 256 entradas. Una muestra `.fullscreen` o `.normal`, o la salida, limpian la entrada de esa ventana.
+   - AeroSpace independiente: sin cambios y sin consultas.
+
+3. **Hogar recuperado.** En `gridApplyRecoveredWindowHome`, si la ventana llega `.standard` (no está en los contenedores fullscreen ni oculto), su hogar pendiente es válido (mismo arranque y PID) y la clasificación es `.fullscreen`, vincularla al `macOsNativeFullscreenWindowsContainer` del workspace del hogar con `layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)`, en lugar de vincularla como normal. Después se consume el hogar, igual que hoy. Con otra clasificación, comportamiento actual. Agregar el parámetro inyectable `nativeSpaceKind` con default, como en el punto 2.
+
+4. **`status`.** Cada entrada de `windows` lleva `"nativeSpace"` con el valor del clasificador, y `nativeDisplays()` se llama una sola vez por `status`. Las ventanas diferidas (`gridDeferredNativeWindows`) llevan `"fullscreen"`. No se agregan títulos ni nombres a nada.
+
+**Reproducción primero.** Antes de tocar el código, agregar a `GridFullscreenExitTest` el test `testFailedWindowServerLookupRetainsFullscreen` con la firma actual (`corroborateFullscreen` devuelve `false`, que hoy representa también una consulta fallida): ventana en el contenedor fullscreen, AX `false`, backend propio ⇒ **debe seguir** en el contenedor. Correrlo: debe fallar. Pegar la salida en rojo en el informe. Después migrarlo a la firma nueva (`.unknown`, dentro del plazo) sin cambiar sus aserciones.
+
+**Tests a adaptar (cambio de especificación deliberado, listado acá).** `testFalseAXReadingExitsWithoutCorroboration` pasa a `testFalseAXReadingExitsOnNormalSpace` con `.normal` (la aserción de salida se mantiene). `testFalseAXReadingRetainsCorroboratedFullscreen` pasa a usar `.fullscreen`. `testStandaloneIgnoresCorroboration` queda igual: cero consultas.
+
+**Tests nuevos.**
+- Tabla del clasificador: los cinco casos del punto 1, más un Space tipo 0 junto a uno tipo 4 ⇒ `.normal`.
+- `.unknown` a 0 s y a 9,9 s ⇒ conserva. A 10 s continuos ⇒ sale. Si en el medio hay un `.fullscreen`, el plazo vuelve a empezar.
+- Hogar recuperado `.standard` con `.fullscreen` ⇒ contenedor fullscreen con `.macos(prevParentKind:)` según `floating`, y hogar consumido. Con `.normal` ⇒ comportamiento actual.
+- Con identidad de AeroSpace independiente, el hogar recuperado y la normalización no consultan WindowServer.
+
+**Invariantes.** Ninguna ventana sale del contenedor fullscreen del backend propio sin un `.normal` de WindowServer, salvo después de 10 s continuos de `.unknown`. La evidencia nativa nunca mete en fullscreen una ventana que no tenía un fullscreen conocido (contenedor actual u hogar retenido). AeroSpace independiente se comporta igual que antes.
+
+**Verificación.** `swift test --filter GridFullscreenExitTest` (y la clase del hogar recuperado), suite completa del backend, parche regenerado y `git diff --stat`.
+
+---
+
+## F0-10b · Controlador: no confirmar una salida que WindowServer contradice `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/SpaceMap.swift` (`WindowInfo`), `Sources/GridCore/DynamicEngine.swift` (`reconcileFullscreen`, rama «presente con `nativeFullscreen == false`», y constantes), `Tests/GridCoreTests/FullscreenResilienceTests.swift`.
+
+**Especificación.**
+
+1. `WindowInfo.nativeSpace: String?`, opcional: falta en backends viejos y en estados guardados. Va como último parámetro del `init` con default `nil`. Se decodifica de `status` sin más cambios. No se agrega a `NavigationWindowState`.
+2. En `reconcileFullscreen`, para un vínculo cuya ventana está presente con `nativeFullscreen == false`:
+   - `nativeSpace == "fullscreen"`: el contenedor del backend contradice a WindowServer y no es evidencia de salida. Poner `windowed` y `absent` en 0, no mutar el mapa ni llamar al backend, y seguir. Emitir `fullscreen-doubt kind=disagree window=… pid=… space=…` solo al entrar en ese estado: memoria por identidad, que se limpia cuando la ventana vuelve a `nativeFullscreen == true` o el vínculo se borra.
+   - `nativeSpace == "normal"` o `nil`: comportamiento actual (`exitConfirmations = 2`).
+   - Cualquier otro valor (`"unknown"`): `windowed += 1`, y la salida se confirma recién con `unknownExitConfirmations = 5` muestras. El evento de duda lleva `kind=windowed-unknown count=N`.
+   - Si las muestras alternan `normal` y `unknown`, el umbral lo decide la muestra actual: `normal` con `windowed >= 2` sale, `unknown` con `windowed >= 5` sale.
+3. Mientras dura el desacuerdo, el casillero exclusivo del vínculo no se marca `dormant` ni cambia. Si el pase de `dormant` del final de `refresh()` lo marcaría, excluir los vínculos en desacuerdo.
+
+**Reproducción primero.** Agregar primero solo el campo del punto 1, escribir los tests 1 y 2 de abajo y correrlos: deben fallar. Pegar la salida en rojo en el informe. Después implementar el punto 2.
+
+**Tests nuevos (`FullscreenResilienceTests`).**
+1. El caso real: dos vínculos fullscreen, uno con la tarjeta movida a mano (`manuallyEdited`, casillero exclusivo). Durante 5 muestras el backend falso los reporta presentes con `nativeFullscreen: false` y `nativeSpace: "fullscreen"`. Resultado: `spaces`, `fullscreens` y `layouts` idénticos, `MapBackend` sin ningún movimiento ni `restore`, y un solo `fullscreen-doubt kind=disagree` por ventana.
+2. Después de eso, vuelven a `nativeFullscreen: true`: mapa idéntico y sin eventos de salida.
+3. Salida real con `nativeSpace: "normal"`: igual que `testRealExitRequiresTwoSamples`.
+4. `"unknown"`: 4 muestras ⇒ sin salida. La 5.ª ⇒ salida por el camino actual.
+5. Decodificar un `WindowInfo` sin `nativeSpace` (JSON de un backend viejo) funciona y queda `nil`.
+
+**Invariantes.** Una salida real con evidencia `normal` se refleja en ≤ 2 muestras, igual que hoy (I4). Sin evidencia nativa (`nil`), el comportamiento es el de F0-3. Ningún evento lleva títulos ni nombres.
+
+**Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
