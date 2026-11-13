@@ -5,7 +5,7 @@ Hacé clic derecho en el ícono de AeroGrid de la barra superior. Si hay una act
 1. Pulsá **Actualizar AeroGrid…**. La actualización se descarga y se prepara en segundo plano; podés seguir usando tus espacios.
 2. En el mismo menú podés ver el progreso, abrir los detalles o **Cancelar actualización** durante la preparación.
 3. Cuando termina de prepararse, AeroGrid se cierra, instala ambos componentes y vuelve a abrirse. Tus ventanas no se cierran.
-4. Si macOS pide renovar Accesibilidad, habilitá **AeroGrid** y **AeroGrid Backend** y pulsá **Recuperar**.
+4. Si macOS pide renovar Accesibilidad, habilitá **AeroGrid** y **AeroGrid Backend** y pulsá **Recuperar**. Con la firma local opcional (`python3 scripts/setup-signing.py`, ver la [guía de instalación](../BUILD-ON-ANOTHER-MAC.md)) las actualizaciones conservan el permiso.
 
 No hace falta cerrar AeroGrid antes de pulsar **Actualizar**: la app coordina su propio cierre cuando la compilación está lista. El actualizador comprueba que ambos componentes hayan terminado antes de reemplazarlos. Nunca fuerza su cierre. Los comandos de compilación o ayuda que mencionan la ruta de AeroGrid no cuentan como una instancia abierta.
 
@@ -15,7 +15,7 @@ No hace falta cerrar AeroGrid antes de pulsar **Actualizar**: la app coordina su
 
 La app descarga el código publicado en `fferrioli/aerogrid`, lo compila en esta Mac y usa el instalador que ya conserva tu configuración. Necesita internet, Swift 6.2 o posterior y Python 3.9 o posterior, las mismas herramientas usadas para la instalación inicial. Debe estar instalada en `~/Applications` con su backend incluido.
 
-Esto permite seguir usando compilación local sin una membresía paga de Apple Developer. No desactiva Gatekeeper, cambia políticas de la empresa ni omite la autorización de Accesibilidad. Una política que también impida compilar/ejecutar apps locales puede requerir intervención de IT.
+Esto permite seguir usando compilación local sin una membresía paga de Apple Developer. No desactiva Gatekeeper, cambia políticas de la empresa ni omite la autorización de Accesibilidad. La firma local opcional tampoco: solo hace que la identidad de las apps no cambie entre compilaciones. Una política que también impida compilar/ejecutar apps locales puede requerir intervención de IT.
 
 La actualización usa una carpeta aislada; no modifica tu checkout, tus cambios de código locales ni los lugares de tus espacios. Los huecos y distribuciones existentes conservan su posición.
 

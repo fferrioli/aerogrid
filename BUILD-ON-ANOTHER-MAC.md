@@ -88,7 +88,21 @@ open "$HOME/Applications/AeroGrid.app"
 ```
 
 El instalador usa firma ad-hoc local, instala en tu carpeta de usuario, genera
-las rutas correctas y respalda la configuración existente. En una Mac sin
+las rutas correctas y respalda la configuración existente.
+
+Opcional, recomendado: para no volver a aprobar Accesibilidad en cada
+instalación o actualización, antes de instalar ejecutá una sola vez
+
+```sh
+python3 scripts/setup-signing.py
+```
+
+Crea una identidad autofirmada **AeroGrid Local Code Signing** en tu llavero de
+inicio de sesión y el instalador firma con ella (la salida termina con
+`Signing: AeroGrid Local Code Signing`). La primera instalación firmada pide
+aprobar Accesibilidad una vez más; las siguientes la conservan. No marca el
+certificado como confiable ni cambia Gatekeeper. `--status` la muestra y
+`--remove` la borra. En una Mac sin
 configuración previa crea una mínima. No se necesita instalar AeroSpace aparte.
 
 ## 5. Dar permiso y comprobar
@@ -113,7 +127,8 @@ la build más reciente siguen necesitando validación en esa Mac.
 ## Actualizar o desinstalar
 
 Para actualizar: Salir de AeroGrid, reemplazar el código fuente, compilar e
-instalar de nuevo. Un cambio de firma puede exigir renovar ambos permisos.
+instalar de nuevo. Con firma ad-hoc, o al pasar a la firma local o cambiar de
+certificado, hay que renovar ambos permisos; con la misma identidad local se conservan.
 
 Para desinstalar, cerrá primero AeroGrid y su servicio y ejecutá:
 

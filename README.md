@@ -107,7 +107,7 @@ If an entry is missing, add its app from `~/Applications` with **+**. Then click
 
 AeroGrid uses one menu bar icon. Click it to organize; right-click for settings, recovery, pause/resume, and quit. Pause stops both gesture input and window management. Start at login is optional in settings.
 
-Local builds use ad-hoc signing and do not require a paid Apple Developer membership. There is currently no notarized release; managed Macs may restrict locally built apps too. See the [Spanish installation guide](BUILD-ON-ANOTHER-MAC.md) for a step-by-step walkthrough.
+Local builds use ad-hoc signing and do not require a paid Apple Developer membership. Ad-hoc signatures change with every build, so each reinstall or update asks for Accessibility again. To keep the approval across builds, run `python3 scripts/setup-signing.py` once: it creates a self-signed **AeroGrid Local Code Signing** identity in your login keychain, and the installer then signs both apps with it. Approve Accessibility once more after the first signed install; later installs keep it. It does not mark the certificate as trusted or change Gatekeeper; `python3 scripts/setup-signing.py --remove` deletes it. There is currently no notarized release; managed Macs may restrict locally built apps too. See the [Spanish installation guide](BUILD-ON-ANOTHER-MAC.md) for a step-by-step walkthrough.
 
 ## 🔄 Updates without Terminal
 
