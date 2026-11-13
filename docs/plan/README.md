@@ -97,7 +97,10 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-11c Controlador: el lugar recordado manda en todo el refresco (revisión) | SUB-impl | hecho | | 2026-11-13 |
 | F0-11d Backend: el movimiento conserva el foco y acepta la evidencia nativa (revisión) | SUB-impl | hecho | | 2026-11-13 |
 | F0-12a Controlador: el pliegue no detiene el refresco ante un choque de identidad (hallazgo de F0-9) | SUB-impl | hecho | | 2026-11-13 |
-| F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
+| F1-0 Firma local estable: decisión y prueba de concepto | ORQ + HUM | hecho (PoC; persistencia TCC en vivo pendiente) | | 2026-11-13 |
+| F1-0a `setup-signing.py` | SUB-impl | en curso | | |
+| F1-0b Instalador: firma con identidad y reinicio TCC por DR | SUB-impl | en curso | | |
+| F1-0c Docs y verificación en vivo | ORQ + HUM | pendiente | | |
 | F1-1 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
 | F3-1 … F3-5 | ver fase 3 | pendiente | | |
