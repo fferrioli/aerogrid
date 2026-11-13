@@ -17,7 +17,56 @@ struct GridNativeDisplay {
     var spaces: [(id: UInt64, type: Int)]
 }
 
-@MainActor private func nativeDisplays() -> [GridNativeDisplay]? {
+enum GridNativeSpaceKind: String {
+    case fullscreen, normal, unknown
+}
+
+func gridClassifyNativeSpace(windowSpaces: [UInt64]?, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind {
+    guard let displays, let windowSpaces, !windowSpaces.isEmpty else { return .unknown }
+    let spaces = displays.flatMap(\.spaces)
+    var allFullscreen = true
+    for id in windowSpaces {
+        let matches = spaces.filter { $0.id == id }
+        guard !matches.isEmpty else { return .unknown }
+        if matches.contains(where: { $0.type != 4 }) { allFullscreen = false }
+    }
+    return allFullscreen ? .fullscreen : .normal
+}
+
+let gridFullscreenUnknownGrace: TimeInterval = 10
+
+struct GridFullscreenUnknownTracker {
+    private var unknownSince: [UInt32: TimeInterval] = [:]
+
+    mutating func shouldExit(windowID: UInt32, now: TimeInterval) -> Bool {
+        if let since = unknownSince[windowID] { return now - since >= gridFullscreenUnknownGrace }
+        if unknownSince.count >= 256,
+           let oldest = unknownSince.min(by: { lhs, rhs in
+               lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
+           })?.key {
+            unknownSince.removeValue(forKey: oldest)
+        }
+        unknownSince[windowID] = now
+        return false
+    }
+
+    mutating func clear(windowID: UInt32) {
+        unknownSince.removeValue(forKey: windowID)
+    }
+}
+
+@MainActor var gridFullscreenUnknownTracker = GridFullscreenUnknownTracker()
+
+@MainActor func gridNativeSpaceKind(windowID: UInt32, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind {
+    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber]
+    return gridClassifyNativeSpace(windowSpaces: spaces?.map(\.uint64Value), displays: displays)
+}
+
+@MainActor func gridNativeSpaceKind(windowID: UInt32) -> GridNativeSpaceKind {
+    gridNativeSpaceKind(windowID: windowID, displays: nativeDisplays())
+}
+
+@MainActor func nativeDisplays() -> [GridNativeDisplay]? {
     guard let array = AeroGridCopyDisplaySpaces() as? [[String: Any]] else { return nil }
     return array.compactMap { value in
         guard let id = value["Display Identifier"] as? String,
@@ -38,10 +87,17 @@ struct GridNativeDisplay {
 }
 @MainActor func gridNativeMonitor(_ window: Window) -> MonitorInfo? {
     guard window.parent is MacosFullscreenWindowsContainer else { return nil }
-    return gridNativeMonitor(windowID: window.windowId)
+    return gridNativeMonitor(window, displays: nativeDisplays())
+}
+@MainActor func gridNativeMonitor(_ window: Window, displays: [GridNativeDisplay]?) -> MonitorInfo? {
+    guard window.parent is MacosFullscreenWindowsContainer else { return nil }
+    return gridNativeMonitor(windowID: window.windowId, displays: displays)
 }
 @MainActor func gridNativeMonitor(windowID: UInt32) -> MonitorInfo? {
-    guard let displays = nativeDisplays() else { return nil }
+    gridNativeMonitor(windowID: windowID, displays: nativeDisplays())
+}
+@MainActor func gridNativeMonitor(windowID: UInt32, displays: [GridNativeDisplay]?) -> MonitorInfo? {
+    guard let displays else { return nil }
     let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
     guard let display = displays.first(where: { d in spaces.contains { value in d.spaces.contains { $0.id == value.uint64Value && $0.type == 4 } } }) else { return nil }
     return sortedMonitorInfos.first { monitor in
@@ -52,9 +108,9 @@ struct GridNativeDisplay {
     }
 }
 
-@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32) -> Bool {
+@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32, displays: [GridNativeDisplay]? = nativeDisplays()) -> Bool {
     let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
-    return nativeDisplays()?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
+    return displays?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
 }
 
 @MainActor func gridActivateUndiscoveredNativeWindow(_ windowID: UInt32, monitor: MonitorInfo) async throws {
@@ -69,11 +125,11 @@ struct GridNativeDisplay {
           }) else { throw NSError(domain: "Fullscreen destination is no longer available", code: 1) }
     try await gridNativeSwitch(display: display, destination: destination.id, monitor: monitor)
 }
-@MainActor func gridNativeWorkspaceMonitors() -> [String: Int] {
+@MainActor func gridNativeWorkspaceMonitors(displays: [GridNativeDisplay]? = nativeDisplays()) -> [String: Int] {
     var result: [String: Int] = [:]
     for ws in Workspace.all {
         for window in ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive {
-            if let id = gridNativeMonitor(window)?.monitorId_oneBased { result[ws.name] = id }
+            if let id = gridNativeMonitor(window, displays: displays)?.monitorId_oneBased { result[ws.name] = id }
         }
     }
     return result
@@ -162,14 +218,14 @@ struct GridNativeDisplay {
     throw NSError(domain: "Native Space navigation did not reach its target", code: 1)
 }
 
-@MainActor func gridNativeVisibleWindows() -> [String: UInt32] {
-    guard let displays = nativeDisplays() else { return [:] }
+@MainActor func gridNativeVisibleWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [String: UInt32] {
+    guard let displays else { return [:] }
     var result: [String: UInt32] = [:]
     for ws in Workspace.all {
         for window in ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive {
             let spaces = AeroGridCopyWindowSpaces(window.windowId) as? [NSNumber] ?? []
             for display in displays where spaces.contains(where: { $0.uint64Value == display.current }) {
-                if let monitor = gridNativeMonitor(window)?.monitorId_oneBased { result[String(monitor)] = window.windowId }
+                if let monitor = gridNativeMonitor(window, displays: displays)?.monitorId_oneBased { result[String(monitor)] = window.windowId }
             }
         }
     }

@@ -117,7 +117,8 @@ struct GridDeferredNativeWindow {
     var inventory: [String: Any] {
         ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
          "floating": home.floating, "monitor": monitor, "nativeMonitor": monitor,
-         "nativeFullscreen": true, "appName": appName, "bundleID": bundleID, "title": appName]
+         "nativeFullscreen": true, "nativeSpace": GridNativeSpaceKind.fullscreen.rawValue,
+         "appName": appName, "bundleID": bundleID, "title": appName]
     }
     func matches(workspace: String, monitor: Int) -> Bool {
         home.workspace == workspace && self.monitor == monitor
@@ -126,7 +127,7 @@ struct GridDeferredNativeWindow {
 @MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 
-@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
+@MainActor private func gridDeferredNativeWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [GridDeferredNativeWindow] {
     let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
     guard !pending.isEmpty else { return [] }
     let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
@@ -137,7 +138,7 @@ struct GridDeferredNativeWindow {
     }
     var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
     for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
-        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id)?.monitorId_oneBased
+        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id, displays: displays)?.monitorId_oneBased
     }
     return pending.sorted { $0.id < $1.id }.compactMap { home in
         guard evidence.validates(home), let monitor = evidence.monitors[home.id],
@@ -183,7 +184,11 @@ struct GridMinimumWidthTracker {
     gridMinimumWidthTracker.forget(windowID: id)
 }
 
-@MainActor func gridApplyRecoveredWindowHome(_ window: Window) {
+@MainActor func gridApplyRecoveredWindowHome(
+    _ window: Window,
+    ownsBackendUI: Bool = gridOwnsBackendUI(),
+    nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
+) {
     guard let home = gridPendingWindowHomes[window.windowId] else { return }
     guard home.boot == gridBootIdentity(), window.app.pid == home.pid else {
         gridForgetRecoveredWindowHome(window.windowId)
@@ -198,6 +203,9 @@ struct GridMinimumWidthTracker {
         window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
     } else if window.layoutReason != .standard {
         return
+    } else if ownsBackendUI && nativeSpaceKind(window.windowId) == .fullscreen {
+        window.bind(to: workspace.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
     } else if home.floating {
         window.bindAsFloatingWindow(to: workspace)
     } else {
@@ -393,6 +401,7 @@ struct GridLayoutCommand: Command {
     }
 
     @MainActor private func status() async throws -> String {
+        let nativeDisplaySnapshot = nativeDisplays()
         let displays: [[String: Any]] = sortedMonitorInfos.map { m in
             let index = m.monitorAppKitNsScreenScreensId - 1
             let screen = NSScreen.screens[index]
@@ -403,9 +412,9 @@ struct GridLayoutCommand: Command {
                     "builtin": CGDisplayIsBuiltin(cg) != 0, "width": m.visibleRect.width, "height": m.visibleRect.height]
         }
         let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
-        var nativeHomes = gridNativeWorkspaceMonitors()
-        var nativeVisible = gridNativeVisibleWindows()
-        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0)?.monitorId_oneBased }
+        var nativeHomes = gridNativeWorkspaceMonitors(displays: nativeDisplaySnapshot)
+        var nativeVisible = gridNativeVisibleWindows(displays: nativeDisplaySnapshot)
+        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0, displays: nativeDisplaySnapshot)?.monitorId_oneBased }
             ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
         let boot = gridBootIdentity()
         let actualHomes: [GridWindowHome] = Workspace.all.flatMap { workspace in
@@ -445,15 +454,16 @@ struct GridLayoutCommand: Command {
                     "workspace": ws.name, "floating": window.isFloating, "monitor": ws.workspaceMonitor.monitorId_oneBased ?? 0,
                     "title": (try? await window.getTitle(.nonCancellable)) ?? "",
                     "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
-                    "nativeFullscreen": native]
-                if let monitor = gridNativeMonitor(window)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
+                    "nativeFullscreen": native,
+                    "nativeSpace": gridNativeSpaceKind(windowID: window.windowId, displays: nativeDisplaySnapshot).rawValue]
+                if let monitor = gridNativeMonitor(window, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
                 inventory.append(value)
             }
         }
-        for deferred in gridDeferredNativeWindows() {
+        for deferred in gridDeferredNativeWindows(displays: nativeDisplaySnapshot) {
             inventory.append(deferred.inventory)
             nativeHomes[deferred.home.workspace] = deferred.monitor
-            if gridNativeWindowIsVisible(deferred.home.id) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
+            if gridNativeWindowIsVisible(deferred.home.id, displays: nativeDisplaySnapshot) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
         }
         let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,

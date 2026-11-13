@@ -377,4 +377,90 @@ import XCTest
         gridApplyRecoveredWindowHome(fullscreen)
         XCTAssertTrue(fullscreen.parent === Workspace.get(byName: home.workspace).macOsNativeFullscreenWindowsContainer)
     }
+
+    private func checkStandardHomeRecovery(floating: Bool, nativeSpace: GridNativeSpaceKind,
+                                           bundleIdentifier: String = "local.AeroGrid.Backend") async throws {
+        let current = Workspace.get(byName: "grid-recovered-current")
+        let known = TestWindow.new(id: 1, parent: current.rootTilingContainer)
+        _ = known.focusWindow()
+        let saved = await execute(["grid-layout", "snapshot"])
+        let boot = try JSONDecoder().decode(GridLayoutSnapshot.self, from: Data(saved.stdout.joined().utf8)).boot
+        let home = GridWindowHome(id: 99, pid: known.app.pid, boot: boot, workspace: "grid-recovered-home", floating: floating)
+        defer { gridForgetRecoveredWindowHome(home.id) }
+        let data = String(decoding: try JSONEncoder().encode([home]), as: UTF8.self)
+        let result = await execute(["grid-layout", "--data", data, "recover-homes"])
+        XCTAssertTrue(result.stderr.isEmpty)
+
+        let window = TestWindow.new(id: home.id, parent: current.rootTilingContainer)
+        let owned = gridOwnsBackendUI(bundleIdentifier: bundleIdentifier)
+        var queries = 0
+        gridApplyRecoveredWindowHome(window, ownsBackendUI: owned, nativeSpaceKind: { id in
+            XCTAssertEqual(id, home.id)
+            queries += 1
+            return nativeSpace
+        })
+        let destination = Workspace.get(byName: home.workspace)
+        if owned && nativeSpace == .fullscreen {
+            XCTAssertTrue(window.parent === destination.macOsNativeFullscreenWindowsContainer)
+            XCTAssertEqual(window.layoutReason, .macos(prevParentKind: floating ? .floatingWindowsContainer : .tilingContainer))
+        } else {
+            XCTAssertTrue(window.parent === (floating ? destination.floatingWindowsContainer : destination.rootTilingContainer))
+            XCTAssertEqual(window.layoutReason, .standard)
+        }
+        XCTAssertEqual(queries, owned ? 1 : 0)
+
+        // A consumed home cannot pull this window back on the next pass.
+        window.bind(to: current.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        window.layoutReason = .standard
+        gridApplyRecoveredWindowHome(window, ownsBackendUI: owned, nativeSpaceKind: { _ in
+            XCTFail("Consumed home queried WindowServer")
+            return .fullscreen
+        })
+        XCTAssertTrue(window.parent === current.rootTilingContainer)
+        XCTAssertEqual(window.layoutReason, .standard)
+    }
+
+    func testRecoveredStandardTiledHomeRetainsNativeFullscreen() async throws {
+        try await checkStandardHomeRecovery(floating: false, nativeSpace: .fullscreen)
+    }
+
+    func testRecoveredStandardFloatingHomeRetainsNativeFullscreen() async throws {
+        try await checkStandardHomeRecovery(floating: true, nativeSpace: .fullscreen)
+    }
+
+    func testRecoveredStandardTiledHomeOnNormalSpace() async throws {
+        try await checkStandardHomeRecovery(floating: false, nativeSpace: .normal)
+    }
+
+    func testRecoveredStandardFloatingHomeOnNormalSpace() async throws {
+        try await checkStandardHomeRecovery(floating: true, nativeSpace: .normal)
+    }
+
+    func testRecoveredStandardHomeOnUnknownSpaceStaysNormal() async throws {
+        try await checkStandardHomeRecovery(floating: false, nativeSpace: .unknown)
+    }
+
+    func testStandaloneRecoveredHomeDoesNotQueryWindowServer() async throws {
+        try await checkStandardHomeRecovery(floating: true, nativeSpace: .fullscreen, bundleIdentifier: "bobko.aerospace")
+    }
+
+    func testStatusIncludesNativeSpaceForEveryWindow() async throws {
+        let workspace = Workspace.get(byName: name)
+        TestWindow.new(id: UInt32.max, parent: workspace.rootTilingContainer)
+        TestWindow.new(id: UInt32.max - 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
+        let result = await execute(["grid-layout", "status"])
+        XCTAssertTrue(result.stderr.isEmpty)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.joined().utf8)) as? [String: Any])
+        let inventory = try XCTUnwrap(value["windows"] as? [[String: Any]])
+        XCTAssertEqual(inventory.count, 2)
+        for window in inventory {
+            XCTAssertEqual(window["nativeSpace"] as? String, "unknown", "Missing native evidence must not be inferred from the container")
+        }
+    }
+
+    func testDeferredInventoryIncludesFullscreenNativeSpace() {
+        let home = GridWindowHome(id: 99, pid: 4, boot: "test", workspace: "grid-home", floating: false)
+        let deferred = GridDeferredNativeWindow(home: home, monitor: 1, appName: "", bundleID: "")
+        XCTAssertEqual(deferred.inventory["nativeSpace"] as? String, "fullscreen")
+    }
 }
