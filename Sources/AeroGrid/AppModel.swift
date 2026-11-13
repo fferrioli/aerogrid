@@ -12,6 +12,12 @@ final class AppModel: ObservableObject {
     @Published var gestureMessage = "Swipe to inspect recognition"
     @Published private(set) var paused = false { didSet { if paused { input.reset() } } }
     @Published private(set) var pauseChanging = false
+    private var gate = ReconciliationGate()
+    /// Mirrors the gate for the engine queue, so a background refresh admitted just before a lock skips once it runs.
+    private let reconciliationOpen = LockedFlag(true)
+    private var sessionInactive = false
+    private var notifiedLocked = false
+    private var screensAsleep = false
     private var managementNeedsSync = true
     private var backendLaunchPolicy = BackendLaunchPolicy()
     private var shuttingDown = false
@@ -124,6 +130,24 @@ final class AppModel: ObservableObject {
             self?.topologySettlesAt = Date().addingTimeInterval(0.8)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self?.refresh() }
         })
+        for (name, locked) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            notifications.append(DistributedNotificationCenter.default().addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+                self?.notifiedLocked = locked
+                self?.refresh()
+            })
+        }
+        for (name, asleep) in [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false)] {
+            notifications.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.screensAsleep = asleep
+                self?.refresh()
+            })
+        }
+        for (name, inactive) in [(NSWorkspace.sessionDidResignActiveNotification, true), (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
+            notifications.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.sessionInactive = inactive
+                self?.refresh()
+            })
+        }
         notifications.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in self?.recover() })
         notifications.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.input.reset() })
         notifications.append(DistributedNotificationCenter.default().addObserver(forName: .init("local.AeroGrid.action"), object: nil, queue: .main) { [weak self] notification in
@@ -164,10 +188,12 @@ final class AppModel: ObservableObject {
         queue.async {
             var error: Error?
             do { try work(self.engine) } catch let failure { error = failure }
+            let events = self.engine.consumeEvents()
             let observed = self.engine.observed, state = self.engine.state
             let recoveryNotice = error == nil ? self.engine.consumeRecoveryNotice() : nil
             let hints = self.engine.navigationHints()
             DispatchQueue.main.async {
+                for event in events { self.log("map: \(event)") }
                 self.busy = false
                 if self.state != state { self.state = state }
                 if self.desktop != observed { self.desktop = observed }
@@ -186,6 +212,7 @@ final class AppModel: ObservableObject {
                     if self.message != message { self.message = message }
                     if let recoveryNotice { self.log(recoveryNotice) }
                 }
+                if !self.gate.isOpen(at: ProcessInfo.processInfo.systemUptime), self.message != self.restMessage { self.message = self.restMessage }
                 self.writeHealth()
                 completion?(error)
                 while !self.pendingOperations.isEmpty {
@@ -200,7 +227,10 @@ final class AppModel: ObservableObject {
         }
     }
     func refresh() {
-        guard !shuttingDown, !pauseChanging, Date() >= topologySettlesAt else { return }
+        guard !shuttingDown else { return }
+        let reopened = isPreview ? false : updateGate()
+        if reconciliationDecision(open: gate.isOpen(at: ProcessInfo.processInfo.systemUptime), reopened: reopened) == .recover { recover(); return }
+        guard !pauseChanging, Date() >= topologySettlesAt else { return }
         if isPreview {
             perform(feedback:false,coalesce:true) { try $0.refresh() }
             return
@@ -217,12 +247,16 @@ final class AppModel: ObservableObject {
         } else {
             if !inputReady { inputReady = true }
         }
+        guard reconciliationDecision(open: gate.isOpen(at: ProcessInfo.processInfo.systemUptime), reopened: false) == .refresh else {
+            if message != restMessage { message = restMessage }
+            writeHealth(); return
+        }
         guard gestureSelection == nil, !organizingDrag, !editingOrganization, !organizationMenuOpen else { return }
         let desiredPause = paused, syncManagement = managementNeedsSync || paused
         perform(feedback:false,coalesce:true,control:true) { engine in
             do {
                 if syncManagement { try WindowManagerSession.setPaused(desiredPause,backend:self.management) }
-                if !desiredPause { try engine.refresh() }
+                if !desiredPause && self.reconciliationOpen.value { try engine.refresh() }
                 DispatchQueue.main.async { self.managementNeedsSync = false }
             } catch {
                 DispatchQueue.main.async {
@@ -272,7 +306,39 @@ final class AppModel: ObservableObject {
             if shouldRefresh { try engine.refresh() }
         }
     }
-    func recover() { managementNeedsSync = true; launchBackend(); inputReady = !paused && input.start(); refresh() }
+    private var restMessage: String {
+        gate.reason == "locked" ? "En reposo · pantalla bloqueada" : "En reposo · pantalla apagada"
+    }
+    private func updateGate() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let previous = gate.reason
+        // The session dictionary omits CGSSessionScreenIsLocked while unlocked, so when it is readable it decides:
+        // a lost screenIsUnlocked notification must not keep the gate closed. The notifications only trigger a tick.
+        let locked: Bool
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+            locked = session["CGSSessionScreenIsLocked"] as? Bool ?? false
+        } else {
+            locked = notifiedLocked
+        }
+        let wasOpen = gate.isOpen(at: now)
+        let reopened = gate.update(locked: locked || sessionInactive, screensAsleep: screensAsleep, at: now)
+        reconciliationOpen.value = gate.isOpen(at: now)
+        if let reason = gate.reason, previous != reason { log("gate: closed reason=\(reason)") }
+        if reopened { log("gate: open") }
+        if wasOpen && !gate.isOpen(at: now) {
+            // Like a topology change: no gesture, drag or organizer survives into a locked or dark session.
+            input.reset(); handleContact(.cancelled); deferredContacts.removeAll()
+            endDrag(); closeOverview?(true)
+        }
+        return reopened
+    }
+    func recover() {
+        managementNeedsSync = true
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else {
+            return
+        }
+        launchBackend(); inputReady = !paused && input.start(); refresh()
+    }
     func setPaused(_ value:Bool) {
         guard value != paused, !pauseChanging else { return }
         pauseChanging = true; input.stop(); inputReady = false; deferredContacts.removeAll(); closeOverview?(false); endDrag()
@@ -624,9 +690,27 @@ final class AppModel: ObservableObject {
                                    "accessibilityGranted": AXIsProcessTrusted(), "paused": paused, "pauseChanging": pauseChanging,
                                    "managementEnabled": backendReady && !pauseChanging ? !paused as Any : NSNull(),
                                    "message": message, "gesture": gestureMessage,
+                                   "reconciliationGate": gate.reason ?? "open",
                                    "updatedAt": ISO8601DateFormatter().string(from: Date())]
         if let data = try? JSONSerialization.data(withJSONObject: health, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: directory.appendingPathComponent("health.json"), options: .atomic)
         }
     }
+}
+
+enum ReconciliationDecision { case wait, refresh, recover }
+
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Bool
+    init(_ value: Bool) { stored = value }
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
+
+func reconciliationDecision(open: Bool, reopened: Bool) -> ReconciliationDecision {
+    guard open else { return .wait }
+    return reopened ? .recover : .refresh
 }

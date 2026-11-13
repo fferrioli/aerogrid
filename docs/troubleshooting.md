@@ -42,6 +42,24 @@ Enable **Displays have separate Spaces** for independent native fullscreen navig
 
 On disconnect, normal gestures reach the adapted spaces without a modifier. Reconnection automatically reunites unchanged groups. If you reorganized a group while disconnected, that choice is preserved; **Reunir grupo** explicitly restores its grouping.
 
+### Fullscreen apps after locking or sleeping the display
+
+While the Mac is locked or the display is off, the map deliberately stays still: the status reads «En reposo · pantalla bloqueada» or «En reposo · pantalla apagada», and `--health` reports `reconciliationGate` as `locked`, `screens-asleep` or `settling` instead of `open`. A few seconds after unlocking, AeroGrid recovers once and resumes.
+
+A fullscreen card that briefly cannot be observed stays in place; a card is removed only after several consecutive observations, and a window that returns gets its previous position back. A card is not treated as leaving fullscreen while macOS still shows its window on a fullscreen Space; the log then shows `map: fullscreen-doubt kind=disagree`. To see what changed and why, look for `gate:` and `map:` lines (for example `map: fullscreen-doubt`, `map: fullscreen-removed reason=closed`, `map: fullscreen-restored`) in `~/Library/Application Support/AeroGrid/diagnostics.log`. They contain window numbers and reasons, not titles or app names.
+
+To check the protection without locking the Mac, the owned backend can hide one window from its Accessibility discovery for a bounded time. Take a fullscreen window `id` from `"$HOME/.local/bin/aerogrid-aerospace" grid-layout status`, then:
+
+```sh
+"$HOME/.local/bin/aerogrid-aerospace" grid-layout --data '{"windowID":ID,"seconds":30,"forget":false}' debug-blind
+```
+
+The card should not move, and no other fullscreen card should change. With `"forget":true` the backend also drops its own retained record, reproducing the original failure: the log shows `fullscreen-doubt`, then `fullscreen-removed reason=closed`, and `fullscreen-restored` at the same place once the window is observable again: at expiry if its Space is the current one, otherwise when its Space is visited (Accessibility does not list a fullscreen window on another Space). If the backend registers the returning window in another workspace, `fullscreen-return` precedes the restore; no other card should change. Blindness lives only in memory, lasts 1–600 seconds, and `"seconds":0` cancels it. Unlike a real blackout, an expired blindness rediscovers the window by itself; a real background fullscreen window is rediscovered when its Space is visited.
+
+If every action fails with «La identidad de un bloque está ocupada por otro espacio» (versions before this fix), close the window that was just opened in the affected app; current versions log `map: fold-skipped reason=identity-taken` and leave that card unfolded instead.
+
+If a card that was in fullscreen turned into an ordinary space while its window stayed in fullscreen (a version before this protection could do that), exit and re-enter fullscreen in that window once, then place its card again.
+
 ## Adapted spaces overlap / «Los espacios adaptados se superponen»
 
 See the [Spanish recovery guide](recovery.es.md). A standalone Python tool can back up and repair the adapted map on an older installation, keep the window service running, and refresh saved observations from the live backend without rebuilding or changing permissions. The corrected app repairs conflicting adapted positions on load and refresh, and releases stale adapted positions when dormant spaces reappear.

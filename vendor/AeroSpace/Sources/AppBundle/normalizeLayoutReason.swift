@@ -1,3 +1,5 @@
+import Foundation
+
 @MainActor
 func normalizeLayoutReason() async throws {
     for workspace in Workspace.all {
@@ -24,12 +26,22 @@ private func validateStillPopups() async throws {
 }
 
 @MainActor
-private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) async throws {
+func _normalizeLayoutReason(
+    workspace: Workspace,
+    windows: [Window],
+    ownsBackendUI: Bool = gridOwnsBackendUI(),
+    nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
+    now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+) async throws {
     for window in windows {
         let isMacosFullscreen = try await window.isMacosFullscreen(.cancellable)
         let isMacosMinimized = try await (!isMacosFullscreen).andAsync { @MainActor @Sendable in try await window.isMacosMinimized(.cancellable) }
         let isMacosWindowOfHiddenApp = !isMacosFullscreen && !isMacosMinimized &&
             !config.automaticallyUnhideMacosHiddenApps && window.macAppUnsafe.nsApp.isHidden
+        if ownsBackendUI && (isMacosFullscreen || isMacosMinimized || isMacosWindowOfHiddenApp ||
+            !(window.parent is MacosFullscreenWindowsContainer)) {
+            gridFullscreenUnknownTracker.clear(windowID: window.windowId)
+        }
         switch window.layoutReason {
             case .standard:
                 guard let parent = window.parent else { continue }
@@ -48,7 +60,21 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
                 }
             case .macos(let prevParentKind):
                 if !isMacosFullscreen && !isMacosMinimized && !isMacosWindowOfHiddenApp {
+                    if ownsBackendUI, window.parent is MacosFullscreenWindowsContainer {
+                        switch nativeSpaceKind(window.windowId) {
+                            case .fullscreen:
+                                gridFullscreenUnknownTracker.clear(windowID: window.windowId)
+                                continue
+                            case .normal:
+                                gridFullscreenUnknownTracker.clear(windowID: window.windowId)
+                            case .unknown:
+                                if !gridFullscreenUnknownTracker.shouldExit(windowID: window.windowId, now: now) {
+                                    continue
+                                }
+                        }
+                    }
                     try await exitMacOsNativeUnconventionalState(window: window, prevParentKind: prevParentKind, workspace: workspace, .cancellable)
+                    if ownsBackendUI { gridFullscreenUnknownTracker.clear(windowID: window.windowId) }
                 }
         }
     }

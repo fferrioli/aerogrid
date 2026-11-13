@@ -154,13 +154,49 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..3780670
+index 0000000..4e0e7b5
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,632 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
++
++struct GridDebugBlindness: Equatable {
++    var expires: TimeInterval
++    var forget: Bool
++}
++struct GridDebugBlindRequest: Decodable {
++    var windowID: UInt32
++    var seconds: Double
++    var forget: Bool = false
++}
++func gridUpdatedBlindness(_ current: [UInt32: GridDebugBlindness], windowID: UInt32,
++                         seconds: Double, forget: Bool, now: TimeInterval) throws -> [UInt32: GridDebugBlindness] {
++    guard seconds.isFinite, seconds == 0 || (1...600).contains(seconds) else {
++        throw NSError(domain: "GridDebugBlind", code: 1)
++    }
++    var result = current
++    result[windowID] = seconds == 0 ? nil : GridDebugBlindness(expires: now + seconds, forget: forget)
++    return result
++}
++func gridFilterBlindWindows<Key: Hashable>(_ lists: [Key: [UInt32]],
++    blindness: [UInt32: GridDebugBlindness], now: TimeInterval)
++    -> (lists: [Key: [UInt32]], blindness: [UInt32: GridDebugBlindness]) {
++    let active = blindness.filter { $0.value.expires > now }
++    return (lists.mapValues { $0.filter { active[$0] == nil } }, active)
++}
++@MainActor var gridDebugBlindness: [UInt32: GridDebugBlindness] = [:]
++@MainActor private func gridScheduleDebugBlindRefresh(_ event: RefreshSessionEvent, after delay: TimeInterval) {
++    Task { @MainActor in
++        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
++        scheduleCancellableCompleteRefreshSession(event)
++    }
++}
++@MainActor private func gridDebugForgets(_ id: UInt32) -> Bool {
++    guard let state = gridDebugBlindness[id] else { return false }
++    return gridOwnsBackendUI() && state.forget && state.expires > ProcessInfo.processInfo.systemUptime
++}
 +
 +struct GridLayoutNode: Codable {
 +    var id: UInt32?
@@ -191,6 +227,39 @@ index 0000000..3780670
 +    var floating: Bool
 +}
 +
++func gridShouldRetainFullscreenHome(fullscreen: Bool, explicitClose: Bool, terminated: Bool, owned: Bool) -> Bool {
++    owned && fullscreen && !explicitClose && !terminated
++}
++
++struct GridPendingHomePruning {
++    var absentSince: TimeInterval?
++
++    mutating func shouldDiscard(processAlive: Bool, sameBoot: Bool, ownerMatches: Bool, locked: Bool, now: TimeInterval) -> Bool {
++        guard processAlive && sameBoot else { return true }
++        // A locked sample breaks the continuous unlocked observation interval.
++        guard !locked && !ownerMatches else { absentSince = nil; return false }
++        if absentSince == nil { absentSince = now }
++        return now - (absentSince ?? now) >= 10
++    }
++}
++
++@MainActor func gridSessionIsLocked() -> Bool {
++    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
++    return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
++}
++
++@MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
++    guard !gridDebugForgets(window.windowId), let workspace = window.nodeWorkspace else { return }
++    var floating = window.isFloating
++    if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
++    gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
++        boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
++    gridPendingHomePruning.removeValue(forKey: window.windowId)
++    gridMinimumWidthTracker.forget(windowID: window.windowId)
++    // A collected window is no longer observed, so its unknown-evidence interval does not continue.
++    gridFullscreenUnknownTracker.clear(windowID: window.windowId)
++}
++
 +struct GridNativeRecoveryEvidence {
 +    var boot: String
 +    var owners: [UInt32: Int32]
@@ -210,16 +279,18 @@ index 0000000..3780670
 +    var inventory: [String: Any] {
 +        ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
 +         "floating": home.floating, "monitor": monitor, "nativeMonitor": monitor,
-+         "nativeFullscreen": true, "appName": appName, "bundleID": bundleID, "title": appName]
++         "nativeFullscreen": true, "nativeSpace": GridNativeSpaceKind.fullscreen.rawValue,
++         "appName": appName, "bundleID": bundleID, "title": appName]
 +    }
 +    func matches(workspace: String, monitor: Int) -> Bool {
 +        home.workspace == workspace && self.monitor == monitor
 +    }
 +}
++@MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 +@MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 +
-+@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
-+    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
++@MainActor private func gridDeferredNativeWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [GridDeferredNativeWindow] {
++    let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
 +    guard !pending.isEmpty else { return [] }
 +    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
 +    var owners: [UInt32: Int32] = [:]
@@ -229,7 +300,7 @@ index 0000000..3780670
 +    }
 +    var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
 +    for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
-+        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id)?.monitorId_oneBased
++        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id, displays: displays)?.monitorId_oneBased
 +    }
 +    return pending.sorted { $0.id < $1.id }.compactMap { home in
 +        guard evidence.validates(home), let monitor = evidence.monitors[home.id],
@@ -271,10 +342,16 @@ index 0000000..3780670
 +
 +@MainActor func gridForgetRecoveredWindowHome(_ id: UInt32) {
 +    gridPendingWindowHomes.removeValue(forKey: id)
++    gridPendingHomePruning.removeValue(forKey: id)
 +    gridMinimumWidthTracker.forget(windowID: id)
++    gridFullscreenUnknownTracker.clear(windowID: id)
 +}
 +
-+@MainActor func gridApplyRecoveredWindowHome(_ window: Window) {
++@MainActor func gridApplyRecoveredWindowHome(
++    _ window: Window,
++    ownsBackendUI: Bool = gridOwnsBackendUI(),
++    nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
++) {
 +    guard let home = gridPendingWindowHomes[window.windowId] else { return }
 +    guard home.boot == gridBootIdentity(), window.app.pid == home.pid else {
 +        gridForgetRecoveredWindowHome(window.windowId)
@@ -289,6 +366,9 @@ index 0000000..3780670
 +        window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
 +    } else if window.layoutReason != .standard {
 +        return
++    } else if ownsBackendUI && nativeSpaceKind(window.windowId) == .fullscreen {
++        window.bind(to: workspace.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
++        window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
 +    } else if home.floating {
 +        window.bindAsFloatingWindow(to: workspace)
 +    } else {
@@ -324,9 +404,29 @@ index 0000000..3780670
 +}
 +struct GridLayoutCommand: Command {
 +    let args: GridLayoutCmdArgs
-+    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot"].contains(args.operation.val) }
++    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot", "debug-blind"].contains(args.operation.val) }
 +    func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
++        await run(env, io, ownsBackendUI: gridOwnsBackendUI())
++    }
++    @MainActor func run(_ env: CmdEnv, _ io: CmdIo, ownsBackendUI: Bool,
++                        nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) }) async -> BinaryExitCode {
 +        do {
++            if args.operation.val == "debug-blind" {
++                guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
++                guard let data = args.data else { return .fail(io.err("Expected debug blindness JSON")) }
++                let request = try JSONDecoder().decode(GridDebugBlindRequest.self, from: Data(data.utf8))
++                let now = ProcessInfo.processInfo.systemUptime
++                gridDebugBlindness = try gridUpdatedBlindness(gridDebugBlindness, windowID: request.windowID,
++                    seconds: request.seconds, forget: request.forget, now: now)
++                if gridDebugForgets(request.windowID) { gridForgetRecoveredWindowHome(request.windowID) }
++                // Socket commands run light sessions, which never collect or discover windows. Schedule complete
++                // refreshes so the blindness takes effect now and lifts at expiry even when no other event arrives.
++                gridScheduleDebugBlindRefresh(.socketServer(args), after: 0.1)
++                if request.seconds > 0 { gridScheduleDebugBlindRefresh(.socketServer(args), after: request.seconds + 0.2) }
++                let response = try JSONSerialization.data(withJSONObject: ["windowID": Double(request.windowID),
++                    "seconds": max(0, (gridDebugBlindness[request.windowID]?.expires ?? now) - now)])
++                return .succ(io.out(String(decoding: response, as: UTF8.self)))
++            }
 +            if args.operation.val == "management-status" { return .succ(io.out(try gridManagementStatus())) }
 +            if args.operation.val == "status" {
 +                guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
@@ -353,6 +453,9 @@ index 0000000..3780670
 +                }
 +                return .succ
 +            }
++            if args.operation.val == "move-fullscreen-window" && !ownsBackendUI {
++                return .fail(io.err("Unknown grid-layout operation"))
++            }
 +            guard let target = args.resolveTargetOrReportError(env, io) else { return .fail }
 +            let ws = target.workspace
 +            switch args.operation.val {
@@ -362,6 +465,28 @@ index 0000000..3780670
 +                guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
 +                guard !(window.parent is MacosFullscreenWindowsContainer) else { return .fail(io.err("Exit fullscreen before moving this window into a different group")) }
 +                return moveWindowToWorkspace(window, ws, io, focusFollowsWindow: false, failIfNoop: false)
++            case "move-fullscreen-window":
++                guard let data = args.data?.data(using: .utf8) else { return .fail(io.err("Expected window identity")) }
++                let identity = try JSONDecoder().decode(GridMoveIdentity.self, from: data)
++                guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
++                let reason: LayoutReason
++                if window.parent is MacosFullscreenWindowsContainer {
++                    reason = window.layoutReason
++                } else {
++                    guard !(window.parent is MacosHiddenAppsWindowsContainer), window.layoutReason == .standard,
++                          nativeSpaceKind(window.windowId) == .fullscreen else { return .fail(io.err("Window is not in native fullscreen")) }
++                    reason = .macos(prevParentKind: window.isFloating ? .floatingWindowsContainer : .tilingContainer)
++                }
++                let destination = ws.macOsNativeFullscreenWindowsContainer
++                if window.parent !== destination {
++                    let wasFocused = focus.windowOrNil === window
++                    window.bind(to: destination, adaptiveWeight: 1, index: INDEX_BIND_LAST)
++                    window.layoutReason = reason
++                    // FrozenFocus still names the source workspace after binding. Carry only the logical
++                    // focus with the window; its native fullscreen Space is already active.
++                    if wasFocused { _ = window.focusWindow() }
++                }
++                return .succ
 +            case "constraints":
 +                var widths: [String: Double] = [:]
 +                let boot = gridBootIdentity()
@@ -468,6 +593,7 @@ index 0000000..3780670
 +    }
 +
 +    @MainActor private func status() async throws -> String {
++        let nativeDisplaySnapshot = nativeDisplays()
 +        let displays: [[String: Any]] = sortedMonitorInfos.map { m in
 +            let index = m.monitorAppKitNsScreenScreensId - 1
 +            let screen = NSScreen.screens[index]
@@ -478,9 +604,9 @@ index 0000000..3780670
 +                    "builtin": CGDisplayIsBuiltin(cg) != 0, "width": m.visibleRect.width, "height": m.visibleRect.height]
 +        }
 +        let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
-+        var nativeHomes = gridNativeWorkspaceMonitors()
-+        var nativeVisible = gridNativeVisibleWindows()
-+        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0)?.monitorId_oneBased }
++        var nativeHomes = gridNativeWorkspaceMonitors(displays: nativeDisplaySnapshot)
++        var nativeVisible = gridNativeVisibleWindows(displays: nativeDisplaySnapshot)
++        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0, displays: nativeDisplaySnapshot)?.monitorId_oneBased }
 +            ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
 +        let boot = gridBootIdentity()
 +        let actualHomes: [GridWindowHome] = Workspace.all.flatMap { workspace in
@@ -491,11 +617,24 @@ index 0000000..3780670
 +            }
 +        }
 +        var homeByID = Dictionary(uniqueKeysWithValues: actualHomes.map { ($0.id, $0) })
-+        for home in gridPendingWindowHomes.values where home.boot == boot {
-+            guard isUnitTest || NSRunningApplication(processIdentifier: home.pid) != nil else {
++        let locked = gridSessionIsLocked()
++        let now = ProcessInfo.processInfo.systemUptime
++        let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
++        var owners: [UInt32: Int32] = [:]
++        for entry in entries {
++            if let id = entry[kCGWindowNumber as String] as? NSNumber,
++               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
++        }
++        for home in Array(gridPendingWindowHomes.values) {
++            if gridDebugForgets(home.id) { gridForgetRecoveredWindowHome(home.id); continue }
++            var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
++            let app = NSRunningApplication(processIdentifier: home.pid)
++            if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
++                sameBoot: home.boot == boot, ownerMatches: owners[home.id] == home.pid, locked: locked, now: now) {
 +                gridForgetRecoveredWindowHome(home.id)
 +                continue
 +            }
++            gridPendingHomePruning[home.id] = policy
 +            homeByID[home.id] = home
 +        }
 +        let homes = try JSONSerialization.jsonObject(with: JSONEncoder().encode(homeByID.keys.sorted().compactMap { homeByID[$0] }))
@@ -507,15 +646,16 @@ index 0000000..3780670
 +                    "workspace": ws.name, "floating": window.isFloating, "monitor": ws.workspaceMonitor.monitorId_oneBased ?? 0,
 +                    "title": (try? await window.getTitle(.nonCancellable)) ?? "",
 +                    "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
-+                    "nativeFullscreen": native]
-+                if let monitor = gridNativeMonitor(window)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
++                    "nativeFullscreen": native,
++                    "nativeSpace": gridNativeSpaceKind(windowID: window.windowId, displays: nativeDisplaySnapshot).rawValue]
++                if let monitor = gridNativeMonitor(window, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
 +                inventory.append(value)
 +            }
 +        }
-+        for deferred in gridDeferredNativeWindows() {
++        for deferred in gridDeferredNativeWindows(displays: nativeDisplaySnapshot) {
 +            inventory.append(deferred.inventory)
 +            nativeHomes[deferred.home.workspace] = deferred.monitor
-+            if gridNativeWindowIsVisible(deferred.home.id) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
++            if gridNativeWindowIsVisible(deferred.home.id, displays: nativeDisplaySnapshot) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
 +        }
 +        let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
 +                                  "focusedMonitor": focusedMonitor,
@@ -652,10 +792,10 @@ index 0000000..3780670
 +}
 diff --git a/Sources/AppBundle/command/impl/GridNativeSpaces.swift b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
 new file mode 100644
-index 0000000..c5b7f36
+index 0000000..6a7033c
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,233 @@
 +import AppKit
 +import Common
 +import PrivateApi
@@ -675,7 +815,52 @@ index 0000000..c5b7f36
 +    var spaces: [(id: UInt64, type: Int)]
 +}
 +
-+@MainActor private func nativeDisplays() -> [GridNativeDisplay]? {
++enum GridNativeSpaceKind: String {
++    case fullscreen, normal, unknown
++}
++
++func gridClassifyNativeSpace(windowSpaces: [UInt64]?, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind {
++    guard let displays, let windowSpaces, !windowSpaces.isEmpty else { return .unknown }
++    let spaces = displays.flatMap(\.spaces)
++    var allFullscreen = true
++    for id in windowSpaces {
++        let matches = spaces.filter { $0.id == id }
++        guard !matches.isEmpty else { return .unknown }
++        if matches.contains(where: { $0.type != 4 }) { allFullscreen = false }
++    }
++    return allFullscreen ? .fullscreen : .normal
++}
++
++let gridFullscreenUnknownGrace: TimeInterval = 10
++
++struct GridFullscreenUnknownTracker {
++    private var unknownSince: [UInt32: TimeInterval] = [:]
++
++    mutating func shouldExit(windowID: UInt32, now: TimeInterval) -> Bool {
++        if let since = unknownSince[windowID] { return now - since >= gridFullscreenUnknownGrace }
++        // At capacity a new window waits for room; evicting would restart another window's running interval.
++        guard unknownSince.count < 256 else { return false }
++        unknownSince[windowID] = now
++        return false
++    }
++
++    mutating func clear(windowID: UInt32) {
++        unknownSince.removeValue(forKey: windowID)
++    }
++}
++
++@MainActor var gridFullscreenUnknownTracker = GridFullscreenUnknownTracker()
++
++@MainActor func gridNativeSpaceKind(windowID: UInt32, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind {
++    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber]
++    return gridClassifyNativeSpace(windowSpaces: spaces?.map(\.uint64Value), displays: displays)
++}
++
++@MainActor func gridNativeSpaceKind(windowID: UInt32) -> GridNativeSpaceKind {
++    gridNativeSpaceKind(windowID: windowID, displays: nativeDisplays())
++}
++
++@MainActor func nativeDisplays() -> [GridNativeDisplay]? {
 +    guard let array = AeroGridCopyDisplaySpaces() as? [[String: Any]] else { return nil }
 +    return array.compactMap { value in
 +        guard let id = value["Display Identifier"] as? String,
@@ -696,10 +881,17 @@ index 0000000..c5b7f36
 +}
 +@MainActor func gridNativeMonitor(_ window: Window) -> MonitorInfo? {
 +    guard window.parent is MacosFullscreenWindowsContainer else { return nil }
-+    return gridNativeMonitor(windowID: window.windowId)
++    return gridNativeMonitor(window, displays: nativeDisplays())
++}
++@MainActor func gridNativeMonitor(_ window: Window, displays: [GridNativeDisplay]?) -> MonitorInfo? {
++    guard window.parent is MacosFullscreenWindowsContainer else { return nil }
++    return gridNativeMonitor(windowID: window.windowId, displays: displays)
 +}
 +@MainActor func gridNativeMonitor(windowID: UInt32) -> MonitorInfo? {
-+    guard let displays = nativeDisplays() else { return nil }
++    gridNativeMonitor(windowID: windowID, displays: nativeDisplays())
++}
++@MainActor func gridNativeMonitor(windowID: UInt32, displays: [GridNativeDisplay]?) -> MonitorInfo? {
++    guard let displays else { return nil }
 +    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
 +    guard let display = displays.first(where: { d in spaces.contains { value in d.spaces.contains { $0.id == value.uint64Value && $0.type == 4 } } }) else { return nil }
 +    return sortedMonitorInfos.first { monitor in
@@ -710,9 +902,9 @@ index 0000000..c5b7f36
 +    }
 +}
 +
-+@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32) -> Bool {
++@MainActor func gridNativeWindowIsVisible(_ windowID: UInt32, displays: [GridNativeDisplay]? = nativeDisplays()) -> Bool {
 +    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
-+    return nativeDisplays()?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
++    return displays?.contains { display in spaces.contains { $0.uint64Value == display.current } } == true
 +}
 +
 +@MainActor func gridActivateUndiscoveredNativeWindow(_ windowID: UInt32, monitor: MonitorInfo) async throws {
@@ -727,11 +919,11 @@ index 0000000..c5b7f36
 +          }) else { throw NSError(domain: "Fullscreen destination is no longer available", code: 1) }
 +    try await gridNativeSwitch(display: display, destination: destination.id, monitor: monitor)
 +}
-+@MainActor func gridNativeWorkspaceMonitors() -> [String: Int] {
++@MainActor func gridNativeWorkspaceMonitors(displays: [GridNativeDisplay]? = nativeDisplays()) -> [String: Int] {
 +    var result: [String: Int] = [:]
 +    for ws in Workspace.all {
 +        for window in ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive {
-+            if let id = gridNativeMonitor(window)?.monitorId_oneBased { result[ws.name] = id }
++            if let id = gridNativeMonitor(window, displays: displays)?.monitorId_oneBased { result[ws.name] = id }
 +        }
 +    }
 +    return result
@@ -820,14 +1012,14 @@ index 0000000..c5b7f36
 +    throw NSError(domain: "Native Space navigation did not reach its target", code: 1)
 +}
 +
-+@MainActor func gridNativeVisibleWindows() -> [String: UInt32] {
-+    guard let displays = nativeDisplays() else { return [:] }
++@MainActor func gridNativeVisibleWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [String: UInt32] {
++    guard let displays else { return [:] }
 +    var result: [String: UInt32] = [:]
 +    for ws in Workspace.all {
 +        for window in ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive {
 +            let spaces = AeroGridCopyWindowSpaces(window.windowId) as? [NSNumber] ?? []
 +            for display in displays where spaces.contains(where: { $0.uint64Value == display.current }) {
-+                if let monitor = gridNativeMonitor(window)?.monitorId_oneBased { result[String(monitor)] = window.windowId }
++                if let monitor = gridNativeMonitor(window, displays: displays)?.monitorId_oneBased { result[String(monitor)] = window.windowId }
 +            }
 +        }
 +    }
@@ -1015,7 +1207,7 @@ index 41756e5..25fc73c 100644
              // Gaps. Consider 4 cases:
              // 1. Multiple children. Layout first child
 diff --git a/Sources/AppBundle/layout/refresh.swift b/Sources/AppBundle/layout/refresh.swift
-index 5e10321..d857ec4 100644
+index 5e10321..7a716b8 100644
 --- a/Sources/AppBundle/layout/refresh.swift
 +++ b/Sources/AppBundle/layout/refresh.swift
 @@ -34,7 +34,7 @@ func runHeavyCompleteRefreshSession(
@@ -1036,11 +1228,31 @@ index 5e10321..d857ec4 100644
          let focusBefore = focus.windowOrNil
  
          await refreshModel_nonCancellable()
+@@ -122,7 +122,12 @@ func refreshModel_nonCancellable() async {
+ @MainActor
+ private func refresh() async throws {
+     // Garbage collect terminated apps and windows before working with all windows
+-    let mapping = try await MacApp.refreshAllAndGetAliveWindowIds(frontmostAppBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
++    var mapping = try await MacApp.refreshAllAndGetAliveWindowIds(frontmostAppBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
++    if gridOwnsBackendUI() && !gridDebugBlindness.isEmpty {
++        let filtered = gridFilterBlindWindows(mapping, blindness: gridDebugBlindness, now: ProcessInfo.processInfo.systemUptime)
++        mapping = filtered.lists
++        gridDebugBlindness = filtered.blindness
++    }
+     let aliveWindowIds = mapping.values.flatMap(id).toSet()
+ 
+     for window in MacWindow.allWindows {
 diff --git a/Sources/AppBundle/normalizeLayoutReason.swift b/Sources/AppBundle/normalizeLayoutReason.swift
-index 3069eff..4bc215d 100644
+index 3069eff..8870645 100644
 --- a/Sources/AppBundle/normalizeLayoutReason.swift
 +++ b/Sources/AppBundle/normalizeLayoutReason.swift
-@@ -6,6 +6,9 @@ func normalizeLayoutReason() async throws {
+@@ -1,3 +1,5 @@
++import Foundation
++
+ @MainActor
+ func normalizeLayoutReason() async throws {
+     for workspace in Workspace.all {
+@@ -6,6 +8,9 @@ func normalizeLayoutReason() async throws {
      }
      try await _normalizeLayoutReason(workspace: focus.workspace, windows: macosMinimizedWindowsContainer.children.filterIsInstance(of: Window.self))
      try await validateStillPopups()
@@ -1050,7 +1262,29 @@ index 3069eff..4bc215d 100644
  }
  
  @MainActor
-@@ -32,6 +35,7 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
+@@ -21,17 +26,28 @@ private func validateStillPopups() async throws {
+ }
+ 
+ @MainActor
+-private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) async throws {
++func _normalizeLayoutReason(
++    workspace: Workspace,
++    windows: [Window],
++    ownsBackendUI: Bool = gridOwnsBackendUI(),
++    nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
++    now: TimeInterval = ProcessInfo.processInfo.systemUptime,
++) async throws {
+     for window in windows {
+         let isMacosFullscreen = try await window.isMacosFullscreen(.cancellable)
+         let isMacosMinimized = try await (!isMacosFullscreen).andAsync { @MainActor @Sendable in try await window.isMacosMinimized(.cancellable) }
+         let isMacosWindowOfHiddenApp = !isMacosFullscreen && !isMacosMinimized &&
+             !config.automaticallyUnhideMacosHiddenApps && window.macAppUnsafe.nsApp.isHidden
++        if ownsBackendUI && (isMacosFullscreen || isMacosMinimized || isMacosWindowOfHiddenApp ||
++            !(window.parent is MacosFullscreenWindowsContainer)) {
++            gridFullscreenUnknownTracker.clear(windowID: window.windowId)
++        }
+         switch window.layoutReason {
+             case .standard:
                  guard let parent = window.parent else { continue }
                  switch true {
                      case isMacosFullscreen:
@@ -1058,7 +1292,29 @@ index 3069eff..4bc215d 100644
                          window.layoutReason = .macos(prevParentKind: parent.kind)
                          window.bind(to: workspace.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
                      case isMacosMinimized:
-@@ -70,4 +74,5 @@ func exitMacOsNativeUnconventionalState(
+@@ -44,7 +60,21 @@ private func _normalizeLayoutReason(workspace: Workspace, windows: [Window]) asy
+                 }
+             case .macos(let prevParentKind):
+                 if !isMacosFullscreen && !isMacosMinimized && !isMacosWindowOfHiddenApp {
++                    if ownsBackendUI, window.parent is MacosFullscreenWindowsContainer {
++                        switch nativeSpaceKind(window.windowId) {
++                            case .fullscreen:
++                                gridFullscreenUnknownTracker.clear(windowID: window.windowId)
++                                continue
++                            case .normal:
++                                gridFullscreenUnknownTracker.clear(windowID: window.windowId)
++                            case .unknown:
++                                if !gridFullscreenUnknownTracker.shouldExit(windowID: window.windowId, now: now) {
++                                    continue
++                                }
++                        }
++                    }
+                     try await exitMacOsNativeUnconventionalState(window: window, prevParentKind: prevParentKind, workspace: workspace, .cancellable)
++                    if ownsBackendUI { gridFullscreenUnknownTracker.clear(windowID: window.windowId) }
+                 }
+         }
+     }
+@@ -70,4 +100,5 @@ func exitMacOsNativeUnconventionalState(
          case .macosMinimizedWindowsContainer, .macosFullscreenWindowsContainer, .macosHiddenAppsWindowsContainer: // wtf case, should never be possible. But If encounter it, let's just re-layout window
              try await window.relayoutWindow(on: workspace, cm)
      }
@@ -1083,7 +1339,7 @@ index fc7bed7..0e1f297 100644
              await answerToClient(
                  exitCode: EXIT_CODE_TWO,
 diff --git a/Sources/AppBundle/tree/MacApp.swift b/Sources/AppBundle/tree/MacApp.swift
-index 94abdf7..03bf874 100644
+index 94abdf7..2ee8adc 100644
 --- a/Sources/AppBundle/tree/MacApp.swift
 +++ b/Sources/AppBundle/tree/MacApp.swift
 @@ -49,6 +49,8 @@ final class MacApp: AbstractApp {
@@ -1110,8 +1366,40 @@ index 94abdf7..03bf874 100644
      // todo merge together with detectNewWindows
      func getFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
          let windowId = try await thread?.runInLoop(cm) { [nsApp, axApp, windows] job in
+@@ -264,11 +274,12 @@ final class MacApp: AbstractApp {
+                 await app.destroy()
+             }
+         }
++        let sessionLocked = gridOwnsBackendUI() && gridSessionIsLocked()
+         return try await withThrowingTaskGroup(of: (pid_t, [UInt32]).self, returning: [MacApp: [UInt32]].self) { group in
+             func refreshTheApp(_ nsApp: NSRunningApplication) {
+                 group.addTask { @Sendable @MainActor in
+                     guard let app = try await MacApp.getOrRegister(nsApp) else { return (nsApp.processIdentifier, []) }
+-                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId))
++                    return (nsApp.processIdentifier, try await app.refreshAndGetAliveWindowIds(frontmostAppBundleId: frontmostAppBundleId, sessionLocked: sessionLocked))
+                 }
+             }
+             // Register new apps
+@@ -297,7 +308,7 @@ final class MacApp: AbstractApp {
+         }
+     }
+ 
+-    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?) async throws -> [UInt32] {
++    private func refreshAndGetAliveWindowIds(frontmostAppBundleId: String?, sessionLocked: Bool) async throws -> [UInt32] {
+         if nsApp.isTerminated {
+             await destroy()
+             return []
+@@ -308,7 +319,7 @@ final class MacApp: AbstractApp {
+             var dead = [UInt32: AxWindow]()
+             // Second line of defence against lock screen. See the first line of defence: closedWindowsCache
+             // Second and third lines of defence are technically needed only to avoid potential flickering
+-            if frontmostAppBundleId != lockScreenAppBundleId {
++            if frontmostAppBundleId != lockScreenAppBundleId && !sessionLocked {
+                 (alive, dead) = try alive.partition {
+                     try job.checkCancellation()
+                     return $0.value.ax.containingWindowId() != nil
 diff --git a/Sources/AppBundle/tree/MacWindow.swift b/Sources/AppBundle/tree/MacWindow.swift
-index 94143ef..db594d4 100644
+index 94143ef..0878c90 100644
 --- a/Sources/AppBundle/tree/MacWindow.swift
 +++ b/Sources/AppBundle/tree/MacWindow.swift
 @@ -1,6 +1,14 @@
@@ -1129,7 +1417,7 @@ index 94143ef..db594d4 100644
  final class MacWindow: Window {
      let macApp: MacApp
      private var prevUnhiddenProportionalPositionInsideWorkspaceRect: CGPoint?
-@@ -77,15 +85,17 @@ final class MacWindow: Window {
+@@ -77,15 +85,22 @@ final class MacWindow: Window {
      //                        If you are unsure, it's better to pass `false`
      @MainActor
      func garbageCollect(skipClosedWindowsCache: Bool) {
@@ -1138,7 +1426,12 @@ index 94143ef..db594d4 100644
              return
          }
          if !skipClosedWindowsCache { cacheClosedWindowIfNeeded() }
-+        gridForgetRecoveredWindowHome(windowId)
++        if gridShouldRetainFullscreenHome(fullscreen: parent is MacosFullscreenWindowsContainer,
++            explicitClose: skipClosedWindowsCache, terminated: macApp.nsApp.isTerminated, owned: gridOwnsBackendUI()) {
++            gridRetainFullscreenHome(self)
++        } else {
++            gridForgetRecoveredWindowHome(windowId)
++        }
          let parent = unbindFromParent().parent
          let deadWindowWorkspace = parent.nodeWorkspace
          let focus = focus
@@ -1148,7 +1441,7 @@ index 94143ef..db594d4 100644
          {
              switch parent.cases {
                  case .tilingContainer, .floatingWindowsContainer, .macosHiddenAppsWindowsContainer, .macosFullscreenWindowsContainer:
-@@ -103,6 +113,10 @@ final class MacWindow: Window {
+@@ -103,6 +118,10 @@ final class MacWindow: Window {
                      break
              }
          }
@@ -1159,7 +1452,7 @@ index 94143ef..db594d4 100644
      }
  
      override func getTitle(_ cm: CancellationMode) async throws -> String { try await macApp.getAxTitle(windowId, cm) ?? "" }
-@@ -164,17 +178,9 @@ final class MacWindow: Window {
+@@ -164,17 +183,9 @@ final class MacWindow: Window {
              // Just a small optimization to avoid unnecessary AX calls for non floating windows
              // Tiling windows should be unhidden with layoutRecursive anyway
              case .floatingWindow:
@@ -1180,7 +1473,7 @@ index 94143ef..db594d4 100644
              case .macosNativeFullscreenWindow, .macosNativeHiddenAppWindow, .macosNativeMinimizedWindow,
                   .macosPopupWindow, .tiling, .rootTilingContainer, .shimContainerRelation: break
          }
-@@ -197,6 +203,14 @@ final class MacWindow: Window {
+@@ -197,6 +208,14 @@ final class MacWindow: Window {
      override func getAxRect(_ cm: CancellationMode) async throws -> Rect? {
          try await macApp.getAxRect(windowId, cm)
      }
@@ -1195,7 +1488,7 @@ index 94143ef..db594d4 100644
  }
  
  extension Window {
-@@ -247,17 +261,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
+@@ -247,17 +266,16 @@ func runOnWindowDetected(ifConventional window: Window) async {
               .macosFullscreenWindowsContainer, .macosHiddenAppsWindowsContainer:
              let layout = global_layoutForNextDetectedWindow
              global_layoutForNextDetectedWindow = nil
@@ -1351,6 +1644,39 @@ index 9d0d606..f56fc66 100644
  protocol ReadableAttr: Sendable {
      associatedtype T
      var getter: @Sendable (AnyObject) -> T? { get }
+diff --git a/Sources/AppBundleTests/GridDebugBlindTest.swift b/Sources/AppBundleTests/GridDebugBlindTest.swift
+new file mode 100644
+index 0000000..242a9b1
+--- /dev/null
++++ b/Sources/AppBundleTests/GridDebugBlindTest.swift
+@@ -0,0 +1,27 @@
++@testable import AppBundle
++import XCTest
++import Common
++
++final class GridDebugBlindTest: XCTestCase {
++    @MainActor func testStandaloneRejectsOperation() async {
++        XCTAssertFalse(gridOwnsBackendUI())
++        let io = CmdIoImpl(stdin: .emptyStdin)
++        _ = await parseCommand(["grid-layout", "--data", "{\"windowID\":2,\"seconds\":1,\"forget\":false}", "debug-blind"]).cmdOrDie.run(.defaultEnv, io)
++        XCTAssertEqual(io.stderr.joined(), "Unknown grid-layout operation")
++    }
++    func testFilteringExpiryAndForget() {
++        let result = gridFilterBlindWindows([1: [UInt32(2), 3, 4]], blindness: [
++            2: GridDebugBlindness(expires: 11, forget: true),
++            3: GridDebugBlindness(expires: 10, forget: false),
++        ], now: 10)
++        XCTAssertEqual(result.lists[1], [3, 4])
++        XCTAssertEqual(result.blindness, [2: GridDebugBlindness(expires: 11, forget: true)])
++    }
++    func testCancellationAndRange() throws {
++        let active = try gridUpdatedBlindness([:], windowID: 2, seconds: 600, forget: true, now: 10)
++        XCTAssertTrue(try gridUpdatedBlindness(active, windowID: 2, seconds: 0, forget: false, now: 11).isEmpty)
++        for seconds in [-1.0, 0.5, 601, .infinity, .nan] {
++            XCTAssertThrowsError(try gridUpdatedBlindness([:], windowID: 2, seconds: seconds, forget: false, now: 10))
++        }
++    }
++}
 diff --git a/Sources/AppBundleTests/GridFocusRecoveryTest.swift b/Sources/AppBundleTests/GridFocusRecoveryTest.swift
 new file mode 100644
 index 0000000..ac1db6e
@@ -1509,16 +1835,213 @@ index 0000000..ac1db6e
 +        XCTAssertTrue(focus.windowOrNil === chosen)
 +    }
 +}
+diff --git a/Sources/AppBundleTests/GridFullscreenExitTest.swift b/Sources/AppBundleTests/GridFullscreenExitTest.swift
+new file mode 100644
+index 0000000..961aeeb
+--- /dev/null
++++ b/Sources/AppBundleTests/GridFullscreenExitTest.swift
+@@ -0,0 +1,164 @@
++@testable import AppBundle
++import XCTest
++
++@MainActor
++final class GridFullscreenExitTest: XCTestCase {
++    override func setUp() async throws {
++        setUpWorkspacesForTests()
++        gridFullscreenUnknownTracker = GridFullscreenUnknownTracker()
++    }
++
++    private func checkExit(bundleIdentifier: String, nativeSpace: GridNativeSpaceKind, remains: Bool) async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        window.isMacosFullscreenForTest = false
++        var queries = 0
++        try await _normalizeLayoutReason(
++            workspace: workspace, windows: [window],
++            ownsBackendUI: gridOwnsBackendUI(bundleIdentifier: bundleIdentifier),
++            nativeSpaceKind: { id in
++                XCTAssertEqual(id, window.windowId)
++                queries += 1
++                return nativeSpace
++            },
++            now: 0
++        )
++        XCTAssertEqual(window.parent is MacosFullscreenWindowsContainer, remains)
++        if remains {
++            guard case .macos(prevParentKind: .floatingWindowsContainer) = window.layoutReason else {
++                return XCTFail("Fullscreen layout reason changed")
++            }
++        } else {
++            guard case .standard = window.layoutReason else { return XCTFail("Window did not exit") }
++            XCTAssertTrue(window.parent === workspace.floatingWindowsContainer)
++        }
++        XCTAssertEqual(queries, bundleIdentifier == "local.AeroGrid.Backend" ? 1 : 0)
++    }
++
++    func testFalseAXReadingRetainsCorroboratedFullscreen() async throws {
++        try await checkExit(bundleIdentifier: "local.AeroGrid.Backend", nativeSpace: .fullscreen, remains: true)
++    }
++
++    func testFailedWindowServerLookupRetainsFullscreen() async throws {
++        try await checkExit(bundleIdentifier: "local.AeroGrid.Backend", nativeSpace: .unknown, remains: true)
++    }
++
++    func testFalseAXReadingExitsOnNormalSpace() async throws {
++        try await checkExit(bundleIdentifier: "local.AeroGrid.Backend", nativeSpace: .normal, remains: false)
++    }
++
++    func testStandaloneIgnoresCorroboration() async throws {
++        try await checkExit(bundleIdentifier: "bobko.aerospace", nativeSpace: .fullscreen, remains: false)
++    }
++
++    func testNativeSpaceClassification() {
++        let displays = [
++            GridNativeDisplay(id: "display-a", current: 1, spaces: [(1, 0), (2, 4)]),
++            GridNativeDisplay(id: "display-b", current: 3, spaces: [(3, 4), (4, 2)]),
++        ]
++        let cases: [(String, [UInt64]?, [GridNativeDisplay]?, GridNativeSpaceKind)] = [
++            ("missing displays", [2], nil, .unknown),
++            ("missing window spaces", nil, displays, .unknown),
++            ("empty window spaces", [], displays, .unknown),
++            ("unlisted space overrides normal", [1, 99], displays, .unknown),
++            ("no listed displays", [2], [], .unknown),
++            ("all fullscreen across displays", [2, 3], displays, .fullscreen),
++            ("non-fullscreen type", [4], displays, .normal),
++            ("all desktops window", [1, 2], displays, .normal),
++        ]
++        for (label, windowSpaces, displays, expected) in cases {
++            XCTAssertEqual(gridClassifyNativeSpace(windowSpaces: windowSpaces, displays: displays), expected, label)
++        }
++    }
++
++    private func checkSamples(_ samples: [(TimeInterval, GridNativeSpaceKind, Bool)]) async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        window.isMacosFullscreenForTest = false
++        for (time, kind, remains) in samples {
++            try await _normalizeLayoutReason(workspace: workspace, windows: [window], ownsBackendUI: true,
++                nativeSpaceKind: { _ in kind }, now: time)
++            XCTAssertEqual(window.parent is MacosFullscreenWindowsContainer, remains, "time=\(time)")
++            XCTAssertEqual(window.layoutReason, remains ? .macos(prevParentKind: .floatingWindowsContainer) : .standard)
++        }
++        XCTAssertFalse(gridFullscreenUnknownTracker.shouldExit(windowID: window.windowId, now: 100), "Exit must clear the timer")
++    }
++
++    func testUnknownSpaceExitsAfterTenContinuousSeconds() async throws {
++        try await checkSamples([(0, .unknown, true), (9.9, .unknown, true), (10, .unknown, false)])
++    }
++
++    func testFullscreenEvidenceRestartsUnknownGrace() async throws {
++        try await checkSamples([
++            (0, .unknown, true), (9, .fullscreen, true),
++            (10, .unknown, true), (19.9, .unknown, true), (20, .unknown, false),
++        ])
++    }
++
++    func testNormalEvidenceExitsImmediatelyDuringGrace() async throws {
++        try await checkSamples([(0, .unknown, true), (1, .normal, false)])
++    }
++
++    func testUnknownTrackerIsPerWindowAndClearRestartsGrace() {
++        var tracker = GridFullscreenUnknownTracker()
++        XCTAssertFalse(tracker.shouldExit(windowID: 1, now: 0))
++        XCTAssertFalse(tracker.shouldExit(windowID: 2, now: 9))
++        XCTAssertTrue(tracker.shouldExit(windowID: 1, now: 10))
++        XCTAssertFalse(tracker.shouldExit(windowID: 2, now: 10))
++        tracker.clear(windowID: 1)
++        XCTAssertFalse(tracker.shouldExit(windowID: 1, now: 10))
++        XCTAssertTrue(tracker.shouldExit(windowID: 1, now: 20))
++    }
++
++    func testUnknownTrackerAtCapacityKeepsRunningIntervals() {
++        var tracker = GridFullscreenUnknownTracker()
++        for id: UInt32 in 1...257 { XCTAssertFalse(tracker.shouldExit(windowID: id, now: 0)) }
++        for id: UInt32 in 1...256 { XCTAssertTrue(tracker.shouldExit(windowID: id, now: 10), "id=\(id) keeps its interval") }
++        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 10), "A window beyond capacity waits for room")
++        tracker.clear(windowID: 1)
++        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 11))
++        XCTAssertTrue(tracker.shouldExit(windowID: 257, now: 21))
++    }
++
++    func testForgottenWindowHomeRestartsUnknownGrace() async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        window.isMacosFullscreenForTest = false
++        func sample(_ time: TimeInterval) async throws {
++            try await _normalizeLayoutReason(workspace: workspace, windows: [window], ownsBackendUI: true,
++                nativeSpaceKind: { _ in .unknown }, now: time)
++        }
++        try await sample(0)
++        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer)
++        // Collection and home recovery both end by forgetting the window's pending home: the observation stream breaks.
++        gridForgetRecoveredWindowHome(window.windowId)
++        try await sample(11)
++        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer, "A returning window starts a new unknown interval")
++        try await sample(21)
++        XCTAssertFalse(window.parent is MacosFullscreenWindowsContainer)
++    }
++
++    func testNativeEvidenceDoesNotCreateFullscreenWithoutKnownHome() async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.rootTilingContainer)
++        try await _normalizeLayoutReason(workspace: workspace, windows: [window], ownsBackendUI: true,
++            nativeSpaceKind: { _ in XCTFail("Standard windows must not query native evidence"); return .fullscreen }, now: 0)
++        XCTAssertTrue(window.parent === workspace.rootTilingContainer)
++        XCTAssertEqual(window.layoutReason, .standard)
++    }
++}
 diff --git a/Sources/AppBundleTests/GridNativeRecoveryTest.swift b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
 new file mode 100644
-index 0000000..42a3544
+index 0000000..68df680
 --- /dev/null
 +++ b/Sources/AppBundleTests/GridNativeRecoveryTest.swift
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,57 @@
 +@testable import AppBundle
 +import XCTest
 +
 +final class GridNativeRecoveryTest: XCTestCase {
++    func testRetentionDecision() {
++        XCTAssertTrue(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: false, explicitClose: false, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: true, terminated: false, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: true, owned: true))
++        XCTAssertFalse(gridShouldRetainFullscreenHome(fullscreen: true, explicitClose: false, terminated: false, owned: false))
++    }
++
++    func testPendingHomePruning() {
++        var policy = GridPendingHomePruning()
++        func sample(_ now: Double, alive: Bool = true, boot: Bool = true, owner: Bool = false, locked: Bool = false) -> Bool {
++            policy.shouldDiscard(processAlive: alive, sameBoot: boot, ownerMatches: owner, locked: locked, now: now)
++        }
++        XCTAssertTrue(sample(0, alive: false))
++        XCTAssertTrue(sample(0, boot: false))
++        XCTAssertFalse(sample(0))
++        XCTAssertFalse(sample(9))
++        XCTAssertTrue(sample(10))
++        XCTAssertFalse(sample(11, locked: true))
++        XCTAssertFalse(sample(100, locked: true))
++        XCTAssertFalse(sample(101))
++        XCTAssertFalse(sample(110))
++        XCTAssertTrue(sample(111))
++        XCTAssertFalse(sample(112, owner: true))
++        XCTAssertFalse(sample(120))
++    }
++
 +    func testDeferredWindowNeedsCurrentBootMatchingOwnerAndNativeDisplay() {
 +        let home = GridWindowHome(id: 99, pid: 4, boot: "current", workspace: "editor", floating: false)
 +        let valid = GridNativeRecoveryEvidence(boot: "current", owners: [99: 4], monitors: [99: 2])
@@ -1547,10 +2070,10 @@ index 0000000..42a3544
 +}
 diff --git a/Sources/AppBundleTests/command/GridLayoutCommandTest.swift b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
 new file mode 100644
-index 0000000..7de6006
+index 0000000..d5c4a56
 --- /dev/null
 +++ b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,672 @@
 +@testable import AppBundle
 +import Common
 +import XCTest
@@ -1623,6 +2146,212 @@ index 0000000..7de6006
 +        let native = await execute(["grid-layout", "--workspace", "grid-owner-check", "--data", try identity(window.app.pid), "move-window"])
 +        XCTAssertFalse(native.stderr.isEmpty)
 +        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer)
++    }
++    private func moveFullscreen(_ identity: GridMoveIdentity, to workspace: Workspace,
++                                ownsBackendUI: Bool = true, expectedError: String? = nil,
++                                nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
++                                file: StaticString = #filePath, line: UInt = #line) async throws {
++        let data = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
++        let command = try XCTUnwrap(parseCommand(["grid-layout", "--workspace", workspace.name,
++            "--data", data, "move-fullscreen-window"]).cmdOrDie as? GridLayoutCommand, file: file, line: line)
++        XCTAssertTrue(command.shouldResetClosedWindowsCache, file: file, line: line)
++        let io = CmdIoImpl(stdin: .emptyStdin)
++        let result = await command.run(.defaultEnv, io, ownsBackendUI: ownsBackendUI, nativeSpaceKind: nativeSpaceKind)
++        XCTAssertEqual(result, expectedError == nil ? .succ : .fail, file: file, line: line)
++        XCTAssertEqual(io.stderr.joined(), expectedError ?? "", file: file, line: line)
++    }
++    private func moveIdentity(_ window: Window) async throws -> GridMoveIdentity {
++        let workspace = try XCTUnwrap(window.nodeWorkspace)
++        let output = await execute(["grid-layout", "--workspace", workspace.name, "snapshot"])
++        let saved = try JSONDecoder().decode(GridLayoutSnapshot.self, from: Data(output.stdout.joined().utf8))
++        return GridMoveIdentity(id: window.windowId, pid: window.app.pid, boot: saved.boot)
++    }
++    func testMoveFullscreenWindowPreservesReasonOtherWindowsAndFocus() async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let normal = TestWindow.new(id: 1, parent: source.rootTilingContainer, adaptiveWeight: 2)
++        let full = TestWindow.new(id: 2, parent: source.macOsNativeFullscreenWindowsContainer)
++        full.isMacosFullscreenForTest = true
++        let existing = TestWindow.new(id: 3, parent: destination.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(normal.focusWindow())
++        let identity = try await moveIdentity(full)
++        for reason: LayoutReason in [.macos(prevParentKind: .tilingContainer), .macos(prevParentKind: .floatingWindowsContainer)] {
++            full.bind(to: source.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
++            full.layoutReason = reason
++            try await moveFullscreen(identity, to: destination)
++            XCTAssertTrue(full.parent === destination.macOsNativeFullscreenWindowsContainer)
++            XCTAssertEqual(destination.macOsNativeFullscreenWindowsContainer.children, [existing, full])
++            XCTAssertTrue(source.macOsNativeFullscreenWindowsContainer.children.isEmpty)
++            XCTAssertEqual(full.layoutReason, reason)
++            XCTAssertTrue(full.isMacosFullscreenForTest)
++            XCTAssertEqual(source.rootTilingContainer.children, [normal])
++            XCTAssertEqual(normal.getWeight(.h), 2)
++            XCTAssertTrue(focus.windowOrNil === normal)
++            XCTAssertTrue(focus.workspace === source)
++        }
++    }
++    func testReviewMoveFocusedFullscreenKeepsFocusedWindow() async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let normal = TestWindow.new(id: 1, parent: source.rootTilingContainer)
++        let full = TestWindow.new(id: 2, parent: source.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(full.focusWindow())
++        let identity = try await moveIdentity(full)
++        let nativeFocus = TestApp.shared.focusedWindow
++        try await moveFullscreen(identity, to: destination)
++        XCTAssertTrue(full.parent === destination.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(focus.windowOrNil === full, "Moving the focused fullscreen must not focus the normal window \(normal.windowId)")
++        XCTAssertTrue(focus.workspace === destination)
++        XCTAssertTrue(TestApp.shared.focusedWindow === nativeFocus)
++    }
++
++    private func checkStandardFullscreenMove(floating: Bool, nativeSpace: GridNativeSpaceKind,
++                                             file: StaticString = #filePath, line: UInt = #line) async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let parent: NonLeafTreeNodeObject = floating ? source.floatingWindowsContainer : source.rootTilingContainer
++        let window = TestWindow.new(id: 1, parent: parent, adaptiveWeight: 2)
++        let normal = TestWindow.new(id: 2, parent: source.rootTilingContainer)
++        let existing = TestWindow.new(id: 3, parent: destination.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(normal.focusWindow(), file: file, line: line)
++        let identity = try await moveIdentity(window)
++        let recent = parent.mostRecentChild
++        var queries = 0
++        try await moveFullscreen(identity, to: destination,
++            expectedError: nativeSpace == .fullscreen ? nil : "Window is not in native fullscreen",
++            nativeSpaceKind: { id in
++                XCTAssertEqual(id, window.windowId, file: file, line: line)
++                queries += 1
++                return nativeSpace
++            }, file: file, line: line)
++        XCTAssertEqual(queries, 1, file: file, line: line)
++        if nativeSpace == .fullscreen {
++            XCTAssertTrue(window.parent === destination.macOsNativeFullscreenWindowsContainer, file: file, line: line)
++            XCTAssertEqual(destination.macOsNativeFullscreenWindowsContainer.children, [existing, window], file: file, line: line)
++            XCTAssertEqual(window.layoutReason, .macos(prevParentKind: floating ? .floatingWindowsContainer : .tilingContainer), file: file, line: line)
++        } else {
++            XCTAssertTrue(window.parent === parent, file: file, line: line)
++            XCTAssertTrue(parent.mostRecentChild === recent, file: file, line: line)
++            XCTAssertEqual(window.layoutReason, .standard, file: file, line: line)
++            if !floating { XCTAssertEqual(window.getWeight(.h), 2, file: file, line: line) }
++            XCTAssertEqual(destination.macOsNativeFullscreenWindowsContainer.children, [existing], file: file, line: line)
++        }
++        XCTAssertTrue(focus.windowOrNil === normal, file: file, line: line)
++        XCTAssertTrue(focus.workspace === source, file: file, line: line)
++    }
++
++    func testMoveStandardTiledWindowWithFullscreenEvidence() async throws {
++        try await checkStandardFullscreenMove(floating: false, nativeSpace: .fullscreen)
++    }
++
++    func testMoveStandardFloatingWindowWithFullscreenEvidence() async throws {
++        try await checkStandardFullscreenMove(floating: true, nativeSpace: .fullscreen)
++    }
++
++    func testMoveStandardTiledWindowWithNormalEvidenceRejectsWithoutMutation() async throws {
++        try await checkStandardFullscreenMove(floating: false, nativeSpace: .normal)
++    }
++
++    func testMoveStandardFloatingWindowWithNormalEvidenceRejectsWithoutMutation() async throws {
++        try await checkStandardFullscreenMove(floating: true, nativeSpace: .normal)
++    }
++
++    func testMoveStandardTiledWindowWithUnknownEvidenceRejectsWithoutMutation() async throws {
++        try await checkStandardFullscreenMove(floating: false, nativeSpace: .unknown)
++    }
++
++    func testMoveStandardFloatingWindowWithUnknownEvidenceRejectsWithoutMutation() async throws {
++        try await checkStandardFullscreenMove(floating: true, nativeSpace: .unknown)
++    }
++
++    func testMoveFullscreenWindowRejectsHiddenAndNonstandardWithoutQueryingEvidence() async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let hidden = TestWindow.new(id: 1, parent: source.macOsNativeHiddenAppsWindowsContainer)
++        let nonstandard = TestWindow.new(id: 2, parent: source.rootTilingContainer, adaptiveWeight: 2)
++        nonstandard.layoutReason = .macos(prevParentKind: .tilingContainer)
++        XCTAssertTrue(nonstandard.focusWindow())
++        for window in [hidden, nonstandard] {
++            let parent = window.parent
++            let reason = window.layoutReason
++            try await moveFullscreen(moveIdentity(window), to: destination,
++                expectedError: "Window is not in native fullscreen", nativeSpaceKind: { _ in
++                    XCTFail("Ineligible window queried native evidence")
++                    return .fullscreen
++                })
++            XCTAssertTrue(window.parent === parent)
++            XCTAssertEqual(window.layoutReason, reason)
++            XCTAssertTrue(destination.allLeafWindowsRecursive.isEmpty)
++            XCTAssertTrue(focus.windowOrNil === nonstandard)
++            XCTAssertTrue(focus.workspace === source)
++        }
++        XCTAssertEqual(nonstandard.getWeight(.h), 2)
++    }
++
++    func testMoveFullscreenWindowRejectsChangedIdentityWithoutMutation() async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let full = TestWindow.new(id: 1, parent: source.macOsNativeFullscreenWindowsContainer)
++        full.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        XCTAssertTrue(full.focusWindow())
++        let identity = try await moveIdentity(full)
++        let invalid = [
++            GridMoveIdentity(id: identity.id, pid: identity.pid + 1, boot: identity.boot),
++            GridMoveIdentity(id: identity.id, pid: identity.pid, boot: "previous-boot"),
++            GridMoveIdentity(id: 999, pid: identity.pid, boot: identity.boot),
++        ]
++        for request in invalid {
++            try await moveFullscreen(request, to: destination, expectedError: "Window identity changed")
++            XCTAssertEqual(source.macOsNativeFullscreenWindowsContainer.children, [full])
++            XCTAssertTrue(destination.macOsNativeFullscreenWindowsContainer.children.isEmpty)
++            XCTAssertEqual(full.layoutReason, .macos(prevParentKind: .floatingWindowsContainer))
++            XCTAssertTrue(focus.windowOrNil === full)
++            XCTAssertTrue(focus.workspace === source)
++        }
++    }
++    func testMoveFullscreenWindowRejectsNormalWindowWithoutMutation() async throws {
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let normal = TestWindow.new(id: 1, parent: source.rootTilingContainer, adaptiveWeight: 2)
++        XCTAssertTrue(normal.focusWindow())
++        try await moveFullscreen(moveIdentity(normal), to: destination, expectedError: "Window is not in native fullscreen")
++        XCTAssertEqual(source.rootTilingContainer.children, [normal])
++        XCTAssertEqual(normal.getWeight(.h), 2)
++        XCTAssertEqual(normal.layoutReason, .standard)
++        XCTAssertTrue(destination.allLeafWindowsRecursive.isEmpty)
++        XCTAssertTrue(focus.windowOrNil === normal)
++        XCTAssertTrue(focus.workspace === source)
++    }
++    func testMoveFullscreenWindowToCurrentWorkspaceIsUnchanged() async throws {
++        let workspace = Workspace.get(byName: "a")
++        let full = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        full.layoutReason = .macos(prevParentKind: .tilingContainer)
++        let other = TestWindow.new(id: 2, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(full.focusWindow())
++        let recent = workspace.macOsNativeFullscreenWindowsContainer.mostRecentChild
++        try await moveFullscreen(moveIdentity(full), to: workspace)
++        XCTAssertEqual(workspace.macOsNativeFullscreenWindowsContainer.children, [full, other])
++        XCTAssertTrue(workspace.macOsNativeFullscreenWindowsContainer.mostRecentChild === recent)
++        XCTAssertEqual(full.layoutReason, .macos(prevParentKind: .tilingContainer))
++        XCTAssertTrue(focus.windowOrNil === full)
++        XCTAssertTrue(focus.workspace === workspace)
++    }
++    func testMoveFullscreenWindowIsUnknownForStandaloneBackend() async throws {
++        XCTAssertFalse(gridOwnsBackendUI())
++        let source = Workspace.get(byName: "a")
++        let destination = Workspace.get(byName: "b")
++        let full = TestWindow.new(id: 1, parent: source.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(full.focusWindow())
++        let identity = try await moveIdentity(full)
++        try await moveFullscreen(identity, to: destination, ownsBackendUI: false,
++            expectedError: "Unknown grid-layout operation")
++        let data = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
++        let result = await execute(["grid-layout", "--workspace", destination.name, "--data", data, "move-fullscreen-window"])
++        XCTAssertEqual(result.stderr.joined(), "Unknown grid-layout operation")
++        XCTAssertTrue(full.parent === source.macOsNativeFullscreenWindowsContainer)
++        XCTAssertTrue(destination.allLeafWindowsRecursive.isEmpty)
++        XCTAssertTrue(focus.windowOrNil === full)
++        XCTAssertTrue(focus.workspace === source)
 +    }
 +    func testNestedOrderWeightsAndFullscreenRestore() async throws {
 +        let ws = Workspace.get(byName: name)
@@ -1930,6 +2659,92 @@ index 0000000..7de6006
 +        gridApplyRecoveredWindowHome(fullscreen)
 +        XCTAssertTrue(fullscreen.parent === Workspace.get(byName: home.workspace).macOsNativeFullscreenWindowsContainer)
 +    }
++
++    private func checkStandardHomeRecovery(floating: Bool, nativeSpace: GridNativeSpaceKind,
++                                           bundleIdentifier: String = "local.AeroGrid.Backend") async throws {
++        let current = Workspace.get(byName: "grid-recovered-current")
++        let known = TestWindow.new(id: 1, parent: current.rootTilingContainer)
++        _ = known.focusWindow()
++        let saved = await execute(["grid-layout", "snapshot"])
++        let boot = try JSONDecoder().decode(GridLayoutSnapshot.self, from: Data(saved.stdout.joined().utf8)).boot
++        let home = GridWindowHome(id: 99, pid: known.app.pid, boot: boot, workspace: "grid-recovered-home", floating: floating)
++        defer { gridForgetRecoveredWindowHome(home.id) }
++        let data = String(decoding: try JSONEncoder().encode([home]), as: UTF8.self)
++        let result = await execute(["grid-layout", "--data", data, "recover-homes"])
++        XCTAssertTrue(result.stderr.isEmpty)
++
++        let window = TestWindow.new(id: home.id, parent: current.rootTilingContainer)
++        let owned = gridOwnsBackendUI(bundleIdentifier: bundleIdentifier)
++        var queries = 0
++        gridApplyRecoveredWindowHome(window, ownsBackendUI: owned, nativeSpaceKind: { id in
++            XCTAssertEqual(id, home.id)
++            queries += 1
++            return nativeSpace
++        })
++        let destination = Workspace.get(byName: home.workspace)
++        if owned && nativeSpace == .fullscreen {
++            XCTAssertTrue(window.parent === destination.macOsNativeFullscreenWindowsContainer)
++            XCTAssertEqual(window.layoutReason, .macos(prevParentKind: floating ? .floatingWindowsContainer : .tilingContainer))
++        } else {
++            XCTAssertTrue(window.parent === (floating ? destination.floatingWindowsContainer : destination.rootTilingContainer))
++            XCTAssertEqual(window.layoutReason, .standard)
++        }
++        XCTAssertEqual(queries, owned ? 1 : 0)
++
++        // A consumed home cannot pull this window back on the next pass.
++        window.bind(to: current.rootTilingContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
++        window.layoutReason = .standard
++        gridApplyRecoveredWindowHome(window, ownsBackendUI: owned, nativeSpaceKind: { _ in
++            XCTFail("Consumed home queried WindowServer")
++            return .fullscreen
++        })
++        XCTAssertTrue(window.parent === current.rootTilingContainer)
++        XCTAssertEqual(window.layoutReason, .standard)
++    }
++
++    func testRecoveredStandardTiledHomeRetainsNativeFullscreen() async throws {
++        try await checkStandardHomeRecovery(floating: false, nativeSpace: .fullscreen)
++    }
++
++    func testRecoveredStandardFloatingHomeRetainsNativeFullscreen() async throws {
++        try await checkStandardHomeRecovery(floating: true, nativeSpace: .fullscreen)
++    }
++
++    func testRecoveredStandardTiledHomeOnNormalSpace() async throws {
++        try await checkStandardHomeRecovery(floating: false, nativeSpace: .normal)
++    }
++
++    func testRecoveredStandardFloatingHomeOnNormalSpace() async throws {
++        try await checkStandardHomeRecovery(floating: true, nativeSpace: .normal)
++    }
++
++    func testRecoveredStandardHomeOnUnknownSpaceStaysNormal() async throws {
++        try await checkStandardHomeRecovery(floating: false, nativeSpace: .unknown)
++    }
++
++    func testStandaloneRecoveredHomeDoesNotQueryWindowServer() async throws {
++        try await checkStandardHomeRecovery(floating: true, nativeSpace: .fullscreen, bundleIdentifier: "bobko.aerospace")
++    }
++
++    func testStatusIncludesNativeSpaceForEveryWindow() async throws {
++        let workspace = Workspace.get(byName: name)
++        TestWindow.new(id: UInt32.max, parent: workspace.rootTilingContainer)
++        TestWindow.new(id: UInt32.max - 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        let result = await execute(["grid-layout", "status"])
++        XCTAssertTrue(result.stderr.isEmpty)
++        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.joined().utf8)) as? [String: Any])
++        let inventory = try XCTUnwrap(value["windows"] as? [[String: Any]])
++        XCTAssertEqual(inventory.count, 2)
++        for window in inventory {
++            XCTAssertEqual(window["nativeSpace"] as? String, "unknown", "Missing native evidence must not be inferred from the container")
++        }
++    }
++
++    func testDeferredInventoryIncludesFullscreenNativeSpace() {
++        let home = GridWindowHome(id: 99, pid: 4, boot: "test", workspace: "grid-home", floating: false)
++        let deferred = GridDeferredNativeWindow(home: home, monitor: 1, appName: "", bundleID: "")
++        XCTAssertEqual(deferred.inventory["nativeSpace"] as? String, "fullscreen")
++    }
 +}
 diff --git a/Sources/AppBundleTests/command/MoveWorkspaceToMonitorCommandTest.swift b/Sources/AppBundleTests/command/MoveWorkspaceToMonitorCommandTest.swift
 index 2a96cb2..fbdb9fe 100644
@@ -2065,7 +2880,7 @@ index effe43e..4bfd20f 100644
              case .layout:
 diff --git a/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift b/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift
 new file mode 100644
-index 0000000..6948a2c
+index 0000000..acd6f95
 --- /dev/null
 +++ b/Sources/Common/cmdArgs/impl/GridLayoutCmdArgs.swift
 @@ -0,0 +1,12 @@
@@ -2076,7 +2891,7 @@ index 0000000..6948a2c
 +    public var data: String? = nil
 +    public static let parser: CmdParser<Self> = .init(
 +        kind: .gridLayout,
-+        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate)",
++        help: "grid-layout [--workspace NAME] [--data JSON] (status|snapshot|restore|compact|wide|vertical|activate|debug-blind)",
 +        flags: ["--workspace": workspaceSubArgParser(), "--data": singleValueSubArgParser(\.data, "JSON", { .success($0) })],
 +        posArgs: [newMandatoryPosArgParser(\.operation, consumeStrCliArg, placeholder: "<operation>")]
 +    )

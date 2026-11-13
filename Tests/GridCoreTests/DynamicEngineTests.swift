@@ -8,6 +8,7 @@ final class MapBackend: Backend {
     var failActivation: String?
     var activations: [(String, UInt32?)] = []
     var calls: [String] = []
+    var windowMoves: [UInt32] = []
     var failValidation: String?
     var failSnapshot: String?
     var onSnapshot: ((String) -> Void)?
@@ -32,6 +33,7 @@ final class MapBackend: Backend {
     func focus(window: UInt32) throws { screen.focusedWindow = window }
     func windows(workspace: String) throws -> [UInt32] { (screen.windows ?? []).filter { $0.workspace == workspace }.map(\.id) }
     func move(window: UInt32, workspace: String) throws {
+        windowMoves.append(window)
         if failWindow == window { throw GridError.unavailable("Injected move failure") }
         guard let index = screen.windows?.firstIndex(where: { $0.id == window }) else { return }
         screen.windows?[index].workspace = workspace
@@ -83,6 +85,7 @@ final class DynamicEngineTests: XCTestCase {
     }
     func unplug() throws { backend.screen.displays = [laptop]; backend.screen.visible.removeValue(forKey: 2); try engine.refresh() }
     func reconnect() throws { backend.screen.displays = [laptop, ultra]; try engine.refresh() }
+    private func settle(_ n: Int = 3) throws { for _ in 0..<n { try engine.refresh() } }
     func testMigrationPreservesIdentityAndRestartsWithoutDuplicates() throws {
         XCTAssertEqual(Set(engine.map.spaces.map(\.id)), Set(config.grids.flatMap(\.cells).map(\.id)))
         XCTAssertEqual(Set(engine.map.spaces.map { "\($0.board):\($0.row):\($0.column)" }).count, 18)
@@ -142,7 +145,7 @@ final class DynamicEngineTests: XCTestCase {
     func testFullscreenCreatesIndependentTargetsAndReturnsToArrangement() throws {
         backend.screen.windows?[0].nativeFullscreen = true; backend.screen.windows?[0].nativeMonitor = 2
         backend.screen.nativeVisible = [2: 1]
-        try engine.refresh()
+        try settle()
         let full = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
         XCTAssertEqual(engine.map.fullscreens.count, 1)
         try engine.jump(cellID: external.id, displayID: ultra.id)
@@ -151,7 +154,7 @@ final class DynamicEngineTests: XCTestCase {
         try engine.jump(cellID: full.id, displayID: ultra.id)
         XCTAssertEqual(backend.screen.nativeVisible?[2], 1)
         backend.screen.windows?[0].nativeFullscreen = false; backend.screen.nativeVisible = [:]
-        try engine.refresh()
+        try settle()
         XCTAssertTrue(engine.map.fullscreens.isEmpty)
         XCTAssertFalse(engine.map.spaces.contains { $0.id == full.id })
         XCTAssertEqual(backend.trees[external.workspace]?.tree.children?.map(\.weight), [2,3])
@@ -189,9 +192,9 @@ final class DynamicEngineTests: XCTestCase {
     }
     func testReusedWindowNumberDoesNotActivateOldFullscreen() throws {
         backend.screen.windows?[0].nativeFullscreen = true; backend.screen.windows?[0].nativeMonitor = 2
-        try engine.refresh()
+        try settle()
         backend.screen.windows?[0].pid = 99; backend.screen.windows?[0].nativeFullscreen = false
-        try engine.refresh()
+        try settle()
         XCTAssertTrue(engine.map.fullscreens.isEmpty)
     }
     func testUndoRejectsChangedTopology() throws {
@@ -367,11 +370,11 @@ final class DynamicEngineTests: XCTestCase {
         if let index = backend.screen.windows?.firstIndex(where: { $0.id == 2 }) {
             backend.screen.windows?[index].nativeFullscreen = true; backend.screen.windows?[index].nativeMonitor = 1
         }
-        backend.screen.nativeVisible = [1: 2]; try engine.refresh()
+        backend.screen.nativeVisible = [1: 2]; try settle()
         try reconnect()
         XCTAssertEqual(engine.map.families.count, 1)
         if let index = backend.screen.windows?.firstIndex(where: { $0.id == 2 }) { backend.screen.windows?[index].nativeFullscreen = false }
-        backend.screen.nativeVisible = [:]; try engine.refresh()
+        backend.screen.nativeVisible = [:]; try settle()
         XCTAssertTrue(engine.map.families.isEmpty)
         XCTAssertFalse(engine.map.spaces.contains { $0.id == child.id })
         XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1,2])
@@ -402,12 +405,12 @@ final class DynamicEngineTests: XCTestCase {
 
     func testManuallyMovedFullscreenRemainsIndependentAndVisibleOnExit() throws {
         backend.screen.windows?[0].nativeFullscreen = true; backend.screen.windows?[0].nativeMonitor = 2
-        backend.screen.nativeVisible = [2: 1]; try engine.refresh()
+        backend.screen.nativeVisible = [2: 1]; try settle()
         let full = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
         try engine.moveSpace(full.id, to: config.grids[1].cells[0].id)
         let position = engine.map.spaces.first { $0.id == full.id }
         backend.screen.windows?[0].nativeFullscreen = false; backend.screen.nativeVisible = [:]
-        try engine.refresh()
+        try settle()
         let independent = try XCTUnwrap(engine.map.spaces.first { $0.id == full.id })
         XCTAssertEqual(independent.row, position?.row); XCTAssertEqual(independent.column, position?.column)
         XCTAssertNil(independent.nativeWindow)
@@ -463,26 +466,106 @@ final class DynamicEngineTests: XCTestCase {
         XCTAssertEqual(second.id, first.id); XCTAssertEqual(second.workspace, first.workspace)
         XCTAssertEqual(second.row, first.row); XCTAssertEqual(second.column, first.column)
     }
-    func testDerivedIdentityCollisionFailsWithoutPartialMapOrMoves() throws {
+    private func reserveDerivedWorkspace() throws -> Space {
+        let identity = SpaceMap.derivedIdentity(sourceID: external.id, component: "block-1")
+        let reserved = Space(id: UUID().uuidString, name: "Reserved", row: 10, column: 10,
+                             workspace: identity.workspace, preferredRole: "external")
+        var saved = engine.state
+        saved.dynamicMap?.spaces.append(reserved)
+        engine = try DynamicEngine(configuration: config, state: saved, backend: backend)
+        return reserved
+    }
+    func testDerivedWorkspaceCollisionSkipsRepeatedRefreshesAndReportsOnce() throws {
+        _ = try reserveDerivedWorkspace()
+        backend.windowMoves.removeAll()
+        XCTAssertNoThrow(try unplug())
+        XCTAssertNoThrow(try engine.refresh())
+        XCTAssertNoThrow(try engine.refresh())
+        XCTAssertFalse(engine.map.families.contains { $0.sourceID == external.id })
+        XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1, 2])
+        XCTAssertTrue(backend.windowMoves.isEmpty)
+        XCTAssertEqual(engine.consumeEvents().filter { $0.hasPrefix("fold-skipped") },
+                       ["fold-skipped reason=identity-taken space=\(external.id.prefix(8)) block=1"])
+    }
+    func testDerivedWorkspaceCollisionDoesNotBlockOtherSources() throws {
+        _ = try reserveDerivedWorkspace()
+        let second = config.grids[1].cells[5]
+        backend.setWindows((backend.screen.windows ?? []) + [WindowInfo(id: 4, workspace: second.workspace),
+                                                            WindowInfo(id: 5, workspace: second.workspace)])
+        backend.trees[second.workspace] = LayoutSnapshot(boot: "test", tree: .root([
+            LayoutNode(id: 4, pid: 1, weight: 4), LayoutNode(id: 5, pid: 1, weight: 5)
+        ]))
+        try engine.refresh()
+        backend.windowMoves.removeAll()
+        try unplug()
+        XCTAssertFalse(engine.map.families.contains { $0.sourceID == external.id })
+        XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1, 2])
+        let family = try XCTUnwrap(engine.map.families.first { $0.sourceID == second.id })
+        XCTAssertEqual(family.childIDs.count, 2)
+        XCTAssertEqual(family.original.tree.children?.map(\.weight), [4, 5])
+        let child = try XCTUnwrap(engine.map.spaces.first { $0.sourceID == second.id })
+        XCTAssertEqual(try backend.windows(workspace: second.workspace), [4])
+        XCTAssertEqual(try backend.windows(workspace: child.workspace), [5])
+        XCTAssertEqual(Set(backend.windowMoves), [4, 5])
+    }
+    func testDerivedWorkspaceCollisionDoesNotBlockCreateSpace() throws {
+        _ = try reserveDerivedWorkspace()
+        try unplug()
+        let id = try engine.createSpace(nearID: chat.id, displayID: laptop.id)
+        XCTAssertTrue(engine.map.spaces.contains { $0.id == id && $0.userCreated })
+        XCTAssertEqual(engine.map.undo.count, 1)
+        XCTAssertFalse(engine.map.families.contains { $0.sourceID == external.id })
+        XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1, 2])
+        XCTAssertEqual(engine.consumeEvents().filter { $0.hasPrefix("fold-skipped") }.count, 1)
+    }
+    func testDerivedWorkspaceCollisionClearsAfterRemovalAndReportsLaterCollision() throws {
+        let reserved = try reserveDerivedWorkspace()
+        try unplug()
+        try engine.removeEmptySpace(reserved.id)
+        try engine.refresh()
+        let family = try XCTUnwrap(engine.map.families.first { $0.sourceID == external.id })
+        XCTAssertEqual(family.childIDs.count, 2)
+        let child = try XCTUnwrap(engine.map.spaces.first { $0.sourceID == external.id })
+        XCTAssertEqual(child.workspace, reserved.workspace)
+        XCTAssertEqual(try backend.windows(workspace: child.workspace), [2])
+        XCTAssertEqual(family.original.tree.children?.map(\.weight), [2, 3])
+        try reconnect()
+        backend.setWindows((backend.screen.windows ?? []) + [WindowInfo(id: 9, workspace: reserved.workspace)])
+        try engine.refresh()
+        let adopted = try XCTUnwrap(engine.map.spaces.first { $0.workspace == reserved.workspace })
+        XCTAssertNotNil(UUID(uuidString: adopted.id))
+        try unplug()
+        XCTAssertFalse(engine.map.families.contains { $0.sourceID == external.id })
+        XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1, 2])
+        let event = "fold-skipped reason=identity-taken space=\(external.id.prefix(8)) block=1"
+        XCTAssertEqual(engine.consumeEvents().filter { $0.hasPrefix("fold-skipped") }, [event, event])
+    }
+    func testDerivedIdentityCollisionSkipsFoldWithoutPartialMapOrMoves() throws {
         var saved = engine.state
         let reserved = SpaceMap.derivedIdentity(sourceID: external.id, component: "block-1")
         saved.dynamicMap?.spaces.append(Space(id: reserved.id, name: "Reserved", row: 10, column: 10, workspace: "reserved", preferredRole: "external"))
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend)
         let before = engine.map.spaces
-        XCTAssertThrowsError(try unplug())
-        XCTAssertEqual(engine.map.spaces, before)
+        XCTAssertNoThrow(try unplug())
+        XCTAssertEqual(Set(engine.map.spaces.map(\.id)), Set(before.map(\.id)))
+        // The rest of the folded refresh legitimately sets foldedRect/dormant; the fold itself must leave no trace.
+        func identity(_ space: Space?) -> [String?] { [space?.id, space?.workspace, space.map { "\($0.rect)" }, space?.sourceID, space?.nativeWindow.map { "\($0)" }] }
+        XCTAssertEqual(identity(engine.map.spaces.first { $0.id == external.id }), identity(before.first { $0.id == external.id }))
+        XCTAssertEqual(identity(engine.map.spaces.first { $0.id == reserved.id }), identity(before.first { $0.id == reserved.id }))
+        XCTAssertFalse(engine.map.spaces.contains { $0.sourceID == external.id })
         XCTAssertTrue(engine.map.families.isEmpty)
         XCTAssertEqual(Set(try backend.windows(workspace: external.workspace)), [1,2])
+        XCTAssertEqual(engine.consumeEvents().filter { $0.hasPrefix("fold-skipped reason=identity-taken") }.count, 1)
     }
     func testNormalHomeArrangementEditDoesNotMakeFullscreenPermanent() throws {
         backend.screen.windows?[0].nativeFullscreen = true; backend.screen.windows?[0].nativeMonitor = 2
-        backend.screen.nativeVisible = [2: 1]; try engine.refresh()
+        backend.screen.nativeVisible = [2: 1]; try settle()
         let full = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
         try engine.arrange(external.id, layout: "accordion", orientation: "h")
         XCTAssertEqual(engine.map.fullscreens.first?.homeEdited, true)
         XCTAssertFalse(engine.map.fullscreens.first?.manuallyEdited ?? true)
         backend.screen.windows?[0].nativeFullscreen = false; backend.screen.nativeVisible = [:]
-        try engine.refresh()
+        try settle()
         XCTAssertFalse(engine.map.spaces.contains { $0.id == full.id })
         XCTAssertEqual(backend.trees[external.workspace]?.tree.layout, "accordion")
     }
@@ -543,10 +626,10 @@ final class DynamicEngineTests: XCTestCase {
 
     func testExclusiveFullscreenIdentityIsReusedOnReentry() throws {
         backend.screen.windows?[0].nativeFullscreen = true; backend.screen.windows?[0].nativeMonitor = 2
-        backend.screen.nativeVisible = [2: 1]; try engine.refresh()
+        backend.screen.nativeVisible = [2: 1]; try settle()
         let first = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
-        backend.screen.windows?[0].nativeFullscreen = false; backend.screen.nativeVisible = [:]; try engine.refresh()
-        backend.screen.windows?[0].nativeFullscreen = true; backend.screen.nativeVisible = [2: 1]; try engine.refresh()
+        backend.screen.windows?[0].nativeFullscreen = false; backend.screen.nativeVisible = [:]; try settle()
+        backend.screen.windows?[0].nativeFullscreen = true; backend.screen.nativeVisible = [2: 1]; try settle()
         let second = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow?.id == 1 })
         XCTAssertEqual(second.id, first.id)
         XCTAssertEqual(second.row, first.row); XCTAssertEqual(second.column, first.column)

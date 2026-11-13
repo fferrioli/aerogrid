@@ -2,6 +2,42 @@
 import AppKit
 import Common
 
+struct GridDebugBlindness: Equatable {
+    var expires: TimeInterval
+    var forget: Bool
+}
+struct GridDebugBlindRequest: Decodable {
+    var windowID: UInt32
+    var seconds: Double
+    var forget: Bool = false
+}
+func gridUpdatedBlindness(_ current: [UInt32: GridDebugBlindness], windowID: UInt32,
+                         seconds: Double, forget: Bool, now: TimeInterval) throws -> [UInt32: GridDebugBlindness] {
+    guard seconds.isFinite, seconds == 0 || (1...600).contains(seconds) else {
+        throw NSError(domain: "GridDebugBlind", code: 1)
+    }
+    var result = current
+    result[windowID] = seconds == 0 ? nil : GridDebugBlindness(expires: now + seconds, forget: forget)
+    return result
+}
+func gridFilterBlindWindows<Key: Hashable>(_ lists: [Key: [UInt32]],
+    blindness: [UInt32: GridDebugBlindness], now: TimeInterval)
+    -> (lists: [Key: [UInt32]], blindness: [UInt32: GridDebugBlindness]) {
+    let active = blindness.filter { $0.value.expires > now }
+    return (lists.mapValues { $0.filter { active[$0] == nil } }, active)
+}
+@MainActor var gridDebugBlindness: [UInt32: GridDebugBlindness] = [:]
+@MainActor private func gridScheduleDebugBlindRefresh(_ event: RefreshSessionEvent, after delay: TimeInterval) {
+    Task { @MainActor in
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        scheduleCancellableCompleteRefreshSession(event)
+    }
+}
+@MainActor private func gridDebugForgets(_ id: UInt32) -> Bool {
+    guard let state = gridDebugBlindness[id] else { return false }
+    return gridOwnsBackendUI() && state.forget && state.expires > ProcessInfo.processInfo.systemUptime
+}
+
 struct GridLayoutNode: Codable {
     var id: UInt32?
     var pid: Int32?
@@ -31,6 +67,39 @@ struct GridWindowHome: Codable {
     var floating: Bool
 }
 
+func gridShouldRetainFullscreenHome(fullscreen: Bool, explicitClose: Bool, terminated: Bool, owned: Bool) -> Bool {
+    owned && fullscreen && !explicitClose && !terminated
+}
+
+struct GridPendingHomePruning {
+    var absentSince: TimeInterval?
+
+    mutating func shouldDiscard(processAlive: Bool, sameBoot: Bool, ownerMatches: Bool, locked: Bool, now: TimeInterval) -> Bool {
+        guard processAlive && sameBoot else { return true }
+        // A locked sample breaks the continuous unlocked observation interval.
+        guard !locked && !ownerMatches else { absentSince = nil; return false }
+        if absentSince == nil { absentSince = now }
+        return now - (absentSince ?? now) >= 10
+    }
+}
+
+@MainActor func gridSessionIsLocked() -> Bool {
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+    return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
+}
+
+@MainActor func gridRetainFullscreenHome(_ window: MacWindow) {
+    guard !gridDebugForgets(window.windowId), let workspace = window.nodeWorkspace else { return }
+    var floating = window.isFloating
+    if case .macos(let previous) = window.layoutReason { floating = previous == .floatingWindowsContainer }
+    gridPendingWindowHomes[window.windowId] = GridWindowHome(id: window.windowId, pid: window.app.pid,
+        boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
+    gridPendingHomePruning.removeValue(forKey: window.windowId)
+    gridMinimumWidthTracker.forget(windowID: window.windowId)
+    // A collected window is no longer observed, so its unknown-evidence interval does not continue.
+    gridFullscreenUnknownTracker.clear(windowID: window.windowId)
+}
+
 struct GridNativeRecoveryEvidence {
     var boot: String
     var owners: [UInt32: Int32]
@@ -50,16 +119,18 @@ struct GridDeferredNativeWindow {
     var inventory: [String: Any] {
         ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
          "floating": home.floating, "monitor": monitor, "nativeMonitor": monitor,
-         "nativeFullscreen": true, "appName": appName, "bundleID": bundleID, "title": appName]
+         "nativeFullscreen": true, "nativeSpace": GridNativeSpaceKind.fullscreen.rawValue,
+         "appName": appName, "bundleID": bundleID, "title": appName]
     }
     func matches(workspace: String, monitor: Int) -> Bool {
         home.workspace == workspace && self.monitor == monitor
     }
 }
+@MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 
-@MainActor private func gridDeferredNativeWindows() -> [GridDeferredNativeWindow] {
-    let pending = gridPendingWindowHomes.values.filter { Window.get(byId: $0.id) == nil }
+@MainActor private func gridDeferredNativeWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [GridDeferredNativeWindow] {
+    let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
     guard !pending.isEmpty else { return [] }
     let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
     var owners: [UInt32: Int32] = [:]
@@ -69,7 +140,7 @@ struct GridDeferredNativeWindow {
     }
     var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
     for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
-        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id)?.monitorId_oneBased
+        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id, displays: displays)?.monitorId_oneBased
     }
     return pending.sorted { $0.id < $1.id }.compactMap { home in
         guard evidence.validates(home), let monitor = evidence.monitors[home.id],
@@ -111,10 +182,16 @@ struct GridMinimumWidthTracker {
 
 @MainActor func gridForgetRecoveredWindowHome(_ id: UInt32) {
     gridPendingWindowHomes.removeValue(forKey: id)
+    gridPendingHomePruning.removeValue(forKey: id)
     gridMinimumWidthTracker.forget(windowID: id)
+    gridFullscreenUnknownTracker.clear(windowID: id)
 }
 
-@MainActor func gridApplyRecoveredWindowHome(_ window: Window) {
+@MainActor func gridApplyRecoveredWindowHome(
+    _ window: Window,
+    ownsBackendUI: Bool = gridOwnsBackendUI(),
+    nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
+) {
     guard let home = gridPendingWindowHomes[window.windowId] else { return }
     guard home.boot == gridBootIdentity(), window.app.pid == home.pid else {
         gridForgetRecoveredWindowHome(window.windowId)
@@ -129,6 +206,9 @@ struct GridMinimumWidthTracker {
         window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
     } else if window.layoutReason != .standard {
         return
+    } else if ownsBackendUI && nativeSpaceKind(window.windowId) == .fullscreen {
+        window.bind(to: workspace.macOsNativeFullscreenWindowsContainer, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+        window.layoutReason = .macos(prevParentKind: home.floating ? .floatingWindowsContainer : .tilingContainer)
     } else if home.floating {
         window.bindAsFloatingWindow(to: workspace)
     } else {
@@ -164,9 +244,29 @@ private func gridBootIdentity() -> String {
 }
 struct GridLayoutCommand: Command {
     let args: GridLayoutCmdArgs
-    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot"].contains(args.operation.val) }
+    var shouldResetClosedWindowsCache: Bool { !["status", "snapshot", "debug-blind"].contains(args.operation.val) }
     func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
+        await run(env, io, ownsBackendUI: gridOwnsBackendUI())
+    }
+    @MainActor func run(_ env: CmdEnv, _ io: CmdIo, ownsBackendUI: Bool,
+                        nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) }) async -> BinaryExitCode {
         do {
+            if args.operation.val == "debug-blind" {
+                guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
+                guard let data = args.data else { return .fail(io.err("Expected debug blindness JSON")) }
+                let request = try JSONDecoder().decode(GridDebugBlindRequest.self, from: Data(data.utf8))
+                let now = ProcessInfo.processInfo.systemUptime
+                gridDebugBlindness = try gridUpdatedBlindness(gridDebugBlindness, windowID: request.windowID,
+                    seconds: request.seconds, forget: request.forget, now: now)
+                if gridDebugForgets(request.windowID) { gridForgetRecoveredWindowHome(request.windowID) }
+                // Socket commands run light sessions, which never collect or discover windows. Schedule complete
+                // refreshes so the blindness takes effect now and lifts at expiry even when no other event arrives.
+                gridScheduleDebugBlindRefresh(.socketServer(args), after: 0.1)
+                if request.seconds > 0 { gridScheduleDebugBlindRefresh(.socketServer(args), after: request.seconds + 0.2) }
+                let response = try JSONSerialization.data(withJSONObject: ["windowID": Double(request.windowID),
+                    "seconds": max(0, (gridDebugBlindness[request.windowID]?.expires ?? now) - now)])
+                return .succ(io.out(String(decoding: response, as: UTF8.self)))
+            }
             if args.operation.val == "management-status" { return .succ(io.out(try gridManagementStatus())) }
             if args.operation.val == "status" {
                 guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
@@ -193,6 +293,9 @@ struct GridLayoutCommand: Command {
                 }
                 return .succ
             }
+            if args.operation.val == "move-fullscreen-window" && !ownsBackendUI {
+                return .fail(io.err("Unknown grid-layout operation"))
+            }
             guard let target = args.resolveTargetOrReportError(env, io) else { return .fail }
             let ws = target.workspace
             switch args.operation.val {
@@ -202,6 +305,28 @@ struct GridLayoutCommand: Command {
                 guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
                 guard !(window.parent is MacosFullscreenWindowsContainer) else { return .fail(io.err("Exit fullscreen before moving this window into a different group")) }
                 return moveWindowToWorkspace(window, ws, io, focusFollowsWindow: false, failIfNoop: false)
+            case "move-fullscreen-window":
+                guard let data = args.data?.data(using: .utf8) else { return .fail(io.err("Expected window identity")) }
+                let identity = try JSONDecoder().decode(GridMoveIdentity.self, from: data)
+                guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
+                let reason: LayoutReason
+                if window.parent is MacosFullscreenWindowsContainer {
+                    reason = window.layoutReason
+                } else {
+                    guard !(window.parent is MacosHiddenAppsWindowsContainer), window.layoutReason == .standard,
+                          nativeSpaceKind(window.windowId) == .fullscreen else { return .fail(io.err("Window is not in native fullscreen")) }
+                    reason = .macos(prevParentKind: window.isFloating ? .floatingWindowsContainer : .tilingContainer)
+                }
+                let destination = ws.macOsNativeFullscreenWindowsContainer
+                if window.parent !== destination {
+                    let wasFocused = focus.windowOrNil === window
+                    window.bind(to: destination, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+                    window.layoutReason = reason
+                    // FrozenFocus still names the source workspace after binding. Carry only the logical
+                    // focus with the window; its native fullscreen Space is already active.
+                    if wasFocused { _ = window.focusWindow() }
+                }
+                return .succ
             case "constraints":
                 var widths: [String: Double] = [:]
                 let boot = gridBootIdentity()
@@ -308,6 +433,7 @@ struct GridLayoutCommand: Command {
     }
 
     @MainActor private func status() async throws -> String {
+        let nativeDisplaySnapshot = nativeDisplays()
         let displays: [[String: Any]] = sortedMonitorInfos.map { m in
             let index = m.monitorAppKitNsScreenScreensId - 1
             let screen = NSScreen.screens[index]
@@ -318,9 +444,9 @@ struct GridLayoutCommand: Command {
                     "builtin": CGDisplayIsBuiltin(cg) != 0, "width": m.visibleRect.width, "height": m.visibleRect.height]
         }
         let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
-        var nativeHomes = gridNativeWorkspaceMonitors()
-        var nativeVisible = gridNativeVisibleWindows()
-        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0)?.monitorId_oneBased }
+        var nativeHomes = gridNativeWorkspaceMonitors(displays: nativeDisplaySnapshot)
+        var nativeVisible = gridNativeVisibleWindows(displays: nativeDisplaySnapshot)
+        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0, displays: nativeDisplaySnapshot)?.monitorId_oneBased }
             ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
         let boot = gridBootIdentity()
         let actualHomes: [GridWindowHome] = Workspace.all.flatMap { workspace in
@@ -331,11 +457,24 @@ struct GridLayoutCommand: Command {
             }
         }
         var homeByID = Dictionary(uniqueKeysWithValues: actualHomes.map { ($0.id, $0) })
-        for home in gridPendingWindowHomes.values where home.boot == boot {
-            guard isUnitTest || NSRunningApplication(processIdentifier: home.pid) != nil else {
+        let locked = gridSessionIsLocked()
+        let now = ProcessInfo.processInfo.systemUptime
+        let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        var owners: [UInt32: Int32] = [:]
+        for entry in entries {
+            if let id = entry[kCGWindowNumber as String] as? NSNumber,
+               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
+        }
+        for home in Array(gridPendingWindowHomes.values) {
+            if gridDebugForgets(home.id) { gridForgetRecoveredWindowHome(home.id); continue }
+            var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
+            let app = NSRunningApplication(processIdentifier: home.pid)
+            if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
+                sameBoot: home.boot == boot, ownerMatches: owners[home.id] == home.pid, locked: locked, now: now) {
                 gridForgetRecoveredWindowHome(home.id)
                 continue
             }
+            gridPendingHomePruning[home.id] = policy
             homeByID[home.id] = home
         }
         let homes = try JSONSerialization.jsonObject(with: JSONEncoder().encode(homeByID.keys.sorted().compactMap { homeByID[$0] }))
@@ -347,15 +486,16 @@ struct GridLayoutCommand: Command {
                     "workspace": ws.name, "floating": window.isFloating, "monitor": ws.workspaceMonitor.monitorId_oneBased ?? 0,
                     "title": (try? await window.getTitle(.nonCancellable)) ?? "",
                     "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
-                    "nativeFullscreen": native]
-                if let monitor = gridNativeMonitor(window)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
+                    "nativeFullscreen": native,
+                    "nativeSpace": gridNativeSpaceKind(windowID: window.windowId, displays: nativeDisplaySnapshot).rawValue]
+                if let monitor = gridNativeMonitor(window, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
                 inventory.append(value)
             }
         }
-        for deferred in gridDeferredNativeWindows() {
+        for deferred in gridDeferredNativeWindows(displays: nativeDisplaySnapshot) {
             inventory.append(deferred.inventory)
             nativeHomes[deferred.home.workspace] = deferred.monitor
-            if gridNativeWindowIsVisible(deferred.home.id) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
+            if gridNativeWindowIsVisible(deferred.home.id, displays: nativeDisplaySnapshot) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
         }
         let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,
