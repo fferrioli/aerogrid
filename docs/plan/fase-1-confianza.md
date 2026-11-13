@@ -150,3 +150,55 @@ Diseño en `docs/plan/decisiones/F1-0.md`. Contrato común: nombre de la identid
 ### F1-0c · Docs y verificación en vivo `[ORQ]` + `[HUM]`
 
 `README.md`, `BUILD-ON-ANOTHER-MAC.md`, `docs/updates.es.md`: el paso opcional, qué cambia (Accesibilidad persiste), qué no (Gatekeeper, política de seguridad), cómo quitarlo. En vivo: `setup-signing.py`, instalar (reinicia una vez y se aprueba), instalar otro build distinto ⇒ `--health` con `accessibilityGranted: true` sin aprobar de nuevo.
+
+---
+
+## F1-1 · Fichas
+
+Diseño en `docs/plan/decisiones/F1-1.md`. Orden: F1-1b y F1-1c en paralelo; después F1-1a (usa los tipos de F1-1b); después F1-1d (aplicación, ventana de inicio de sesión y acción manual).
+
+### F1-1b · Plantillas y emparejador puro `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/PlaceTemplate.swift` (nuevo), `Tests/GridCoreTests/PlaceMatcherTests.swift` (nuevo). No toca `DynamicEngine` ni `SpaceMap`.
+
+**Especificación.**
+1. Tipos públicos, `Codable`/`Equatable`:
+   ```swift
+   public struct TemplateSlot: Codable, Hashable { public var bundleID: String; public var ordinal: Int }
+   public struct TemplateNode: Codable, Equatable { public var weight: Double; public var orientation: String?; public var layout: String?; public var slot: TemplateSlot?; public var children: [TemplateNode]? }
+   public struct TemplateFloating: Codable, Equatable { public var slot: TemplateSlot; public var x, y, width, height: Double }
+   public struct PlaceTemplate: Codable, Equatable { public var version = 1; public var tree: TemplateNode; public var floating: [TemplateFloating]; public var fullscreen: TemplateSlot?; public var capturedAt: Date }
+   ```
+2. `PlaceTemplate.capture(snapshot: LayoutSnapshot, windows: [WindowInfo], now: Date) -> PlaceTemplate?`: recorre `snapshot.tree` en profundidad y después `floating`; cada hoja con ventana conocida en `windows` (por id y pid) y `bundleID` no vacío se vuelve `TemplateSlot(bundleID, ordinal)`, con ordinal = cantidad de hojas previas de ese bundle en el recorrido. Hojas sin ventana conocida o sin bundle se omiten (los contenedores que queden vacíos se podan). Sin hojas ⇒ `nil`. Conserva pesos, orientación y layout.
+3. `PlaceTemplate.fullscreen(slot:capturedAt:)`: plantilla de tarjeta fullscreen (árbol raíz vacío, `fullscreen = slot`).
+4. `var slots: [TemplateSlot]` en orden de recorrido (árbol, flotantes, fullscreen).
+5. `func instantiate(_ assignment: [TemplateSlot: WindowIdentity], boot: String) -> LayoutSnapshot?`: produce el `LayoutSnapshot` con IDs actuales; ranuras sin ventana se omiten y los contenedores vacíos se podan; `nil` si no queda ninguna.
+6. Emparejador:
+   ```swift
+   public struct CandidateWindow: Equatable { public var identity: WindowIdentity; public var bundleID: String; public var workspace: String }
+   public struct PlaceTarget: Equatable { public var spaceID: String; public var workspace: String; public var template: PlaceTemplate }
+   public struct PlaceAssignment: Equatable { public var window: WindowIdentity; public var spaceID: String; public var slot: TemplateSlot; public var fullscreen: Bool }
+   public enum PlaceMatcher { public static func assign(candidates: [CandidateWindow], targets: [PlaceTarget], present: [CandidateWindow]) -> [PlaceAssignment] }
+   ```
+   Reglas: (a) para cada objetivo, las ventanas de `present` que **no** son candidatas y están en su workspace cubren las ranuras de su bundle en orden de ordinal; (b) una candidata que ya está en el workspace de un objetivo con ranura libre de su bundle la cubre allí (asignación sin cambio de workspace); (c) las ranuras libres restantes, ordenadas por (orden de `targets`, ordinal), se asignan por bundle a las candidatas libres ordenadas por `identity.id` ascendente; (d) una ranura `fullscreen` produce `fullscreen: true`; (e) cada ventana y cada ranura a lo sumo una vez; sobrantes sin asignar. Determinista.
+
+**Reproducción primero.** No aplica (código nuevo): tests primero, verlos fallar por no compilar o por `fatalError` de un esqueleto.
+
+**Tests (de tabla).** Captura: árbol con dos ventanas de la misma app y una de otra ⇒ ordinales 0,1 y 0; flotantes después del árbol; hoja sin bundle omitida y contenedor podado; `nil` sin hojas. `instantiate` ida y vuelta conserva pesos/orientación con IDs nuevos y poda ranuras faltantes. Emparejador: una app en dos espacios; dos ventanas de la misma app para un espacio con dos ranuras; más ventanas que ranuras; más ranuras que ventanas; ventana presente no candidata cubre su ranura; candidata ya en su espacio no se mueve; ranura fullscreen; orden de objetivos decide el empate; resultado idéntico al repetir.
+
+**Verificación.** `swift test --filter PlaceMatcherTests`, luego `swift test`.
+
+### F1-1c · Backend: marcar ventanas alcanzadas por reglas del usuario `[SUB-impl]` · tamaño S
+
+**Archivos.** `vendor/AeroSpace/Sources/AppBundle/command/impl/GridLayoutCommand.swift` (`status()`), el test de `status` en `vendor/AeroSpace/Sources/AppBundleTests/command/GridLayoutCommandTest.swift`, y si hace falta un archivo `Grid*.swift` nuevo. Parche regenerado y `UPSTREAM.md`.
+
+**Especificación.**
+1. Con backend propio, cada ventana de `status` lleva `"ruled": true` si alguna regla `on-window-detected` de la configuración cargada la alcanza **y** su lista `run` contiene un `move-node-to-workspace`. En otro caso la clave se omite (o `false`; elegir uno y documentarlo).
+2. Reusar el emparejamiento que AeroSpace usa al detectar ventanas si es síncrono; si alguna condición necesita lecturas asíncronas de AX, evaluar solo las condiciones síncronas (app-id, app-name) y tratar las demás como coincidentes (conservador: ante duda, la ventana queda en manos de la regla). Documentar la elección en `UPSTREAM.md`.
+3. Ventanas diferidas: sin la clave. AeroSpace independiente: sin cambios.
+
+**Reproducción primero.** Escribir los tests y verlos fallar (falta la clave).
+
+**Tests.** Regla con `if.app-id` y `move-node-to-workspace` ⇒ `ruled` en esa ventana y no en otra; regla sin `move-node-to-workspace` ⇒ sin `ruled`; regla con condición de título ⇒ según la elección del punto 2.
+
+**Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado.
