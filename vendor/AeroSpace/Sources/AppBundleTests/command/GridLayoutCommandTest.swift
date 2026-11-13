@@ -73,13 +73,14 @@ import XCTest
     }
     private func moveFullscreen(_ identity: GridMoveIdentity, to workspace: Workspace,
                                 ownsBackendUI: Bool = true, expectedError: String? = nil,
+                                nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) },
                                 file: StaticString = #filePath, line: UInt = #line) async throws {
         let data = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
         let command = try XCTUnwrap(parseCommand(["grid-layout", "--workspace", workspace.name,
             "--data", data, "move-fullscreen-window"]).cmdOrDie as? GridLayoutCommand, file: file, line: line)
         XCTAssertTrue(command.shouldResetClosedWindowsCache, file: file, line: line)
         let io = CmdIoImpl(stdin: .emptyStdin)
-        let result = await command.run(.defaultEnv, io, ownsBackendUI: ownsBackendUI)
+        let result = await command.run(.defaultEnv, io, ownsBackendUI: ownsBackendUI, nativeSpaceKind: nativeSpaceKind)
         XCTAssertEqual(result, expectedError == nil ? .succ : .fail, file: file, line: line)
         XCTAssertEqual(io.stderr.joined(), expectedError ?? "", file: file, line: line)
     }
@@ -113,6 +114,104 @@ import XCTest
             XCTAssertTrue(focus.workspace === source)
         }
     }
+    func testReviewMoveFocusedFullscreenKeepsFocusedWindow() async throws {
+        let source = Workspace.get(byName: "a")
+        let destination = Workspace.get(byName: "b")
+        let normal = TestWindow.new(id: 1, parent: source.rootTilingContainer)
+        let full = TestWindow.new(id: 2, parent: source.macOsNativeFullscreenWindowsContainer)
+        XCTAssertTrue(full.focusWindow())
+        let identity = try await moveIdentity(full)
+        let nativeFocus = TestApp.shared.focusedWindow
+        try await moveFullscreen(identity, to: destination)
+        XCTAssertTrue(full.parent === destination.macOsNativeFullscreenWindowsContainer)
+        XCTAssertTrue(focus.windowOrNil === full, "Moving the focused fullscreen must not focus the normal window \(normal.windowId)")
+        XCTAssertTrue(focus.workspace === destination)
+        XCTAssertTrue(TestApp.shared.focusedWindow === nativeFocus)
+    }
+
+    private func checkStandardFullscreenMove(floating: Bool, nativeSpace: GridNativeSpaceKind,
+                                             file: StaticString = #filePath, line: UInt = #line) async throws {
+        let source = Workspace.get(byName: "a")
+        let destination = Workspace.get(byName: "b")
+        let parent: NonLeafTreeNodeObject = floating ? source.floatingWindowsContainer : source.rootTilingContainer
+        let window = TestWindow.new(id: 1, parent: parent, adaptiveWeight: 2)
+        let normal = TestWindow.new(id: 2, parent: source.rootTilingContainer)
+        let existing = TestWindow.new(id: 3, parent: destination.macOsNativeFullscreenWindowsContainer)
+        XCTAssertTrue(normal.focusWindow(), file: file, line: line)
+        let identity = try await moveIdentity(window)
+        let recent = parent.mostRecentChild
+        var queries = 0
+        try await moveFullscreen(identity, to: destination,
+            expectedError: nativeSpace == .fullscreen ? nil : "Window is not in native fullscreen",
+            nativeSpaceKind: { id in
+                XCTAssertEqual(id, window.windowId, file: file, line: line)
+                queries += 1
+                return nativeSpace
+            }, file: file, line: line)
+        XCTAssertEqual(queries, 1, file: file, line: line)
+        if nativeSpace == .fullscreen {
+            XCTAssertTrue(window.parent === destination.macOsNativeFullscreenWindowsContainer, file: file, line: line)
+            XCTAssertEqual(destination.macOsNativeFullscreenWindowsContainer.children, [existing, window], file: file, line: line)
+            XCTAssertEqual(window.layoutReason, .macos(prevParentKind: floating ? .floatingWindowsContainer : .tilingContainer), file: file, line: line)
+        } else {
+            XCTAssertTrue(window.parent === parent, file: file, line: line)
+            XCTAssertTrue(parent.mostRecentChild === recent, file: file, line: line)
+            XCTAssertEqual(window.layoutReason, .standard, file: file, line: line)
+            if !floating { XCTAssertEqual(window.getWeight(.h), 2, file: file, line: line) }
+            XCTAssertEqual(destination.macOsNativeFullscreenWindowsContainer.children, [existing], file: file, line: line)
+        }
+        XCTAssertTrue(focus.windowOrNil === normal, file: file, line: line)
+        XCTAssertTrue(focus.workspace === source, file: file, line: line)
+    }
+
+    func testMoveStandardTiledWindowWithFullscreenEvidence() async throws {
+        try await checkStandardFullscreenMove(floating: false, nativeSpace: .fullscreen)
+    }
+
+    func testMoveStandardFloatingWindowWithFullscreenEvidence() async throws {
+        try await checkStandardFullscreenMove(floating: true, nativeSpace: .fullscreen)
+    }
+
+    func testMoveStandardTiledWindowWithNormalEvidenceRejectsWithoutMutation() async throws {
+        try await checkStandardFullscreenMove(floating: false, nativeSpace: .normal)
+    }
+
+    func testMoveStandardFloatingWindowWithNormalEvidenceRejectsWithoutMutation() async throws {
+        try await checkStandardFullscreenMove(floating: true, nativeSpace: .normal)
+    }
+
+    func testMoveStandardTiledWindowWithUnknownEvidenceRejectsWithoutMutation() async throws {
+        try await checkStandardFullscreenMove(floating: false, nativeSpace: .unknown)
+    }
+
+    func testMoveStandardFloatingWindowWithUnknownEvidenceRejectsWithoutMutation() async throws {
+        try await checkStandardFullscreenMove(floating: true, nativeSpace: .unknown)
+    }
+
+    func testMoveFullscreenWindowRejectsHiddenAndNonstandardWithoutQueryingEvidence() async throws {
+        let source = Workspace.get(byName: "a")
+        let destination = Workspace.get(byName: "b")
+        let hidden = TestWindow.new(id: 1, parent: source.macOsNativeHiddenAppsWindowsContainer)
+        let nonstandard = TestWindow.new(id: 2, parent: source.rootTilingContainer, adaptiveWeight: 2)
+        nonstandard.layoutReason = .macos(prevParentKind: .tilingContainer)
+        XCTAssertTrue(nonstandard.focusWindow())
+        for window in [hidden, nonstandard] {
+            let parent = window.parent
+            let reason = window.layoutReason
+            try await moveFullscreen(moveIdentity(window), to: destination,
+                expectedError: "Window is not in native fullscreen", nativeSpaceKind: { _ in
+                    XCTFail("Ineligible window queried native evidence")
+                    return .fullscreen
+                })
+            XCTAssertTrue(window.parent === parent)
+            XCTAssertEqual(window.layoutReason, reason)
+            XCTAssertTrue(destination.allLeafWindowsRecursive.isEmpty)
+            XCTAssertTrue(focus.windowOrNil === nonstandard)
+            XCTAssertTrue(focus.workspace === source)
+        }
+        XCTAssertEqual(nonstandard.getWeight(.h), 2)
+    }
+
     func testMoveFullscreenWindowRejectsChangedIdentityWithoutMutation() async throws {
         let source = Workspace.get(byName: "a")
         let destination = Workspace.get(byName: "b")

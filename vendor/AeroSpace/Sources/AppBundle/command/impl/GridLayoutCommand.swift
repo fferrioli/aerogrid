@@ -248,7 +248,8 @@ struct GridLayoutCommand: Command {
     func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
         await run(env, io, ownsBackendUI: gridOwnsBackendUI())
     }
-    @MainActor func run(_ env: CmdEnv, _ io: CmdIo, ownsBackendUI: Bool) async -> BinaryExitCode {
+    @MainActor func run(_ env: CmdEnv, _ io: CmdIo, ownsBackendUI: Bool,
+                        nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind = { gridNativeSpaceKind(windowID: $0) }) async -> BinaryExitCode {
         do {
             if args.operation.val == "debug-blind" {
                 guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
@@ -308,10 +309,22 @@ struct GridLayoutCommand: Command {
                 guard let data = args.data?.data(using: .utf8) else { return .fail(io.err("Expected window identity")) }
                 let identity = try JSONDecoder().decode(GridMoveIdentity.self, from: data)
                 guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
-                guard window.parent is MacosFullscreenWindowsContainer else { return .fail(io.err("Window is not in native fullscreen")) }
+                let reason: LayoutReason
+                if window.parent is MacosFullscreenWindowsContainer {
+                    reason = window.layoutReason
+                } else {
+                    guard !(window.parent is MacosHiddenAppsWindowsContainer), window.layoutReason == .standard,
+                          nativeSpaceKind(window.windowId) == .fullscreen else { return .fail(io.err("Window is not in native fullscreen")) }
+                    reason = .macos(prevParentKind: window.isFloating ? .floatingWindowsContainer : .tilingContainer)
+                }
                 let destination = ws.macOsNativeFullscreenWindowsContainer
                 if window.parent !== destination {
+                    let wasFocused = focus.windowOrNil === window
                     window.bind(to: destination, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+                    window.layoutReason = reason
+                    // FrozenFocus still names the source workspace after binding. Carry only the logical
+                    // focus with the window; its native fullscreen Space is already active.
+                    if wasFocused { _ = window.focusWindow() }
                 }
                 return .succ
             case "constraints":
