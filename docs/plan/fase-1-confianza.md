@@ -291,3 +291,26 @@ Diseño en `docs/plan/decisiones/F1-2.md`. F1-2a (lógica) es de subagente; las 
 6. `setups.json` ida y vuelta; archivo ausente ⇒ lista vacía; renombrar y borrar.
 
 **Verificación.** `swift test --filter SetupTests`, luego `swift test`; `zsh scripts/build.sh`.
+
+---
+
+## F1-1 · Revisión independiente: hallazgos y destino
+
+| # | Hallazgo | Destino |
+|---|---|---|
+| 1 | La regla de contracción conserva ranuras de ventanas que siguen abiertas en otro espacio (pliegue, movimiento externo): tras reiniciar, todo vuelve al padre y el hijo queda vacío (`testReviewFoldedPlacesSurviveNewBoot`, `testReviewExternalMoveRemovesSourceSlot`) | F1-1e |
+| 2 | Tras reiniciar el backend, una ventana redescubierta en otro workspace se marca `userPlaced` antes de que la recuperación de hogares la devuelva, y la marca persiste (`testReviewBackendRecoveryIsNotUserPlacement`) | F1-1e |
+| 3 | «Restaurar lugares» con ranura fullscreen registra el paso de Deshacer antes de reconciliar la tarjeta fullscreen; Deshacer lo rechaza (`testReviewManualFullscreenRestorationCanUndo`) | F1-1e |
+
+### F1-1e · Correcciones de la revisión `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/PlaceRestoreTests.swift`.
+
+**Especificación.**
+1. **Contracción solo por cierre.** La plantilla anterior se conserva solo si **ninguna** ventana que estaba en el workspace del espacio en la observación anterior está ahora en otro workspace del inventario. Si alguna se mudó (pliegue, movimiento externo, organización), se reemplaza.
+2. **Inferencia de movimientos.** Se infiere `userPlaced` comparando con la línea base del final del refresco anterior, **después** de la recuperación por reinicio del backend o apagón; en el refresco en que cambia `backendSession` o hubo recuperación, no se infiere nada. La línea base se rehace al final de cada refresco. Los movimientos del propio motor (recuperación, pliegue, retorno o salida de fullscreen, restauración, setups) nunca cuentan como del usuario.
+3. **Deshacer con fullscreen.** Si `restorePlaces()` (o `applySetup`) activó fullscreen, refrescar y reconciliar fullscreen antes de que `organize` registre el estado posterior, de modo que Deshacer funcione.
+
+**Reproducción primero.** Copiar los cuatro tests `testReview…` que fallan y el que pasa desde el diff que indica el brief, sin cambiar aserciones; correrlos y pegar el rojo.
+
+**Verificación.** `swift test --filter 'Place(Restore|TemplateCapture|Matcher)Tests'`, luego `swift test`.
