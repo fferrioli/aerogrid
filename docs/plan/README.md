@@ -91,6 +91,7 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | en curso | | |
 | F0-10a Backend: evidencia nativa de tres estados (hallazgo de F0-9) | SUB-impl | hecho | | 2026-11-13 |
 | F0-10b Controlador: no confirmar salida contradicha | SUB-impl | hecho | | 2026-11-13 |
+| F0-10c Controlador: evidencia nativa al leer el inventario (revisión) | SUB-impl | en curso | | |
 | F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
 | F1-1 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |

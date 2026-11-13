@@ -429,3 +429,43 @@ Hay además un camino lateral: una ventana fullscreen recolectada (hogar retenid
 **Invariantes.** Una salida real con evidencia `normal` se refleja en ≤ 2 muestras, igual que hoy (I4). Sin evidencia nativa (`nil`), el comportamiento es el de F0-3. Ningún evento lleva títulos ni nombres.
 
 **Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
+
+---
+
+## F0-10 · Revisión independiente: hallazgos y destino
+
+| # | Hallazgo | Destino |
+|---|---|---|
+| 1 | Durante un desacuerdo, el vínculo se conserva pero `contents()`, la navegación, la captura de `layouts` y la adopción siguen tratando la ventana como normal: la tarjeta queda vacía y no se puede navegar a ella (I2); con dos fullscreen en el mismo workspace se captura y persiste un `layout` | F0-10c |
+| 2 | El plazo de `.unknown` sobrevive a la recolección y a la recuperación del hogar; una ventana que vuelve (o un número reutilizado) sale en su primera muestra `.unknown` | Arreglo chico del orquestador, con test que falla antes |
+| 3 | Un hogar recuperado `.standard` → fullscreen no tiene distribución recordada si `snapshot()` la descartó mientras el contenedor estaba vacío; la salida real posterior agrega la ventana al final | Sin cambio: no es regresión (antes la ventana quedaba normal al final) y en la salida real el controlador restaura `link.original` salvo que el hogar se haya editado. Límite conocido |
+| 4 | Con más de 256 ventanas `.unknown` a la vez, la expulsión de la más vieja reinicia plazos en cadena y ninguna vence | Arreglo chico del orquestador: al tope no se agrega; la ventana nueva espera lugar |
+
+---
+
+## F0-10c · Controlador: aplicar la evidencia nativa al leer el inventario `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/FullscreenResilienceTests.swift`.
+
+**Problema.** F0-10b decide el desacuerdo solo dentro de `reconcileFullscreen`. El resto del motor lee `nativeFullscreen` directamente del inventario: `contents(of:)` (la tarjeta exclusiva queda vacía), `NavigationSelection` (la tarjeta deja de ser elegible), `captureVisibleLayouts` (la ventana cuenta como normal de su workspace) y la adopción de espacios.
+
+**Especificación.**
+
+1. **Un solo punto de lectura.** Función privada `readDesktop() throws -> Desktop` que llama a `backend.desktop()` y aplica el punto 2. Reemplazar **todas** las llamadas a `backend.desktop()` de `DynamicEngine` por `readDesktop()`. `sync(_:)` guarda el resultado ya ajustado en `observed` y `state.lastDesktop`, así que `AppModel` y `NavigationSelection` ven lo mismo.
+2. **Ajuste.** Para cada ventana del inventario cuya identidad tiene vínculo en `map.fullscreens`:
+   - si `nativeFullscreen == false` y `nativeSpace == "fullscreen"`: devolver una copia con `nativeFullscreen = true` y `nativeMonitor = nativeMonitor ?? monitor`; insertar la identidad en `fullscreenDisagreements` y, solo si se insertó, emitir `fullscreen-doubt kind=disagree window=… pid=… space=…`;
+   - en cualquier otro caso: quitar la identidad del conjunto.
+   Ventanas sin vínculo: sin cambios (la evidencia nunca crea un fullscreen). Podar el conjunto a las identidades con vínculo. Como `readDesktop()` puede llamarse varias veces por refresco, el evento sale una vez por entrada en desacuerdo.
+3. **Limpieza.** En `reconcileFullscreen`, la rama `nativeSpace == "fullscreen"` de F0-10b y la exclusión de vínculos en desacuerdo del pase `dormant` quedan sin efecto, porque la ventana llega con `nativeFullscreen == true`: quitarlas. Las ramas `normal`/`nil`/`unknown` de F0-10b quedan como están.
+
+**Reproducción primero.** Escribir los tests nuevos 1 y 2 y correrlos contra el código actual: deben fallar. Pegar la salida en rojo en el informe.
+
+**Tests nuevos (`FullscreenResilienceTests`).**
+1. Desacuerdo con un vínculo exclusivo: `contents(of:)` de la tarjeta exclusiva devuelve la ventana, la del espacio hogar no la incluye, y una `NavigationSelection` construida con `observed` considera elegible la tarjeta.
+2. Dos ventanas fullscreen vinculadas al mismo workspace, ambas en desacuerdo durante 5 muestras: ninguna llamada a `snapshot`, `layouts` idéntico, sin espacios nuevos. Variante: la ventana en desacuerdo aparece en un workspace desconocido ⇒ no se adopta un espacio nuevo.
+3. Ventana **sin** vínculo con `nativeFullscreen: false` y `nativeSpace: "fullscreen"`: sigue siendo normal (no se crea vínculo ni tarjeta exclusiva).
+4. Los tests de F0-10b siguen en verde sin cambiar sus aserciones.
+
+**Invariantes.** Las de F0-10b, más: durante un desacuerdo, la tarjeta del vínculo conserva su contenido y es navegable (I2), y el mapa no cambia ni se persiste por esa ventana.
+
+**Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
