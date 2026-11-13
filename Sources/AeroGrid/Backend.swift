@@ -78,6 +78,10 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
         let data = try JSONEncoder().encode(window)
         try run(["grid-layout", "--workspace", workspace, "--data", String(decoding: data, as: UTF8.self), "move-window"])
     }
+    func moveFullscreen(window: WindowIdentity, workspace: String) throws {
+        let data = try JSONEncoder().encode(window)
+        try run(["grid-layout", "--workspace", workspace, "--data", String(decoding: data, as: UTF8.self), "move-fullscreen-window"])
+    }
     func snapshot(workspace: String) throws -> String { try run(["grid-layout", "--workspace", workspace, "snapshot"]).trimmingCharacters(in: .whitespacesAndNewlines) }
     func restore(workspace: String, snapshot: String) throws { try run(["grid-layout", "--workspace", workspace, "--data", snapshot, "restore"]) }
     func layout(workspace: String, profile: String) throws { try run(["grid-layout", "--workspace", workspace, profile]) }

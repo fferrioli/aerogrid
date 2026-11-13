@@ -6,6 +6,7 @@ final class FullscreenResilienceTests: XCTestCase {
     private final class RestoreTrackingBackend: Backend {
         let base: MapBackend
         var restores = 0
+        var fullscreenMoves: [WindowHome] = []
         init(_ base: MapBackend) { self.base = base }
         func desktop() throws -> Desktop { try base.desktop() }
         func validate(workspace: String, monitor: Int) throws { try base.validate(workspace: workspace, monitor: monitor) }
@@ -16,6 +17,10 @@ final class FullscreenResilienceTests: XCTestCase {
         func windows(workspace: String) throws -> [UInt32] { try base.windows(workspace: workspace) }
         func recoverWindowHomes(_ homes: [WindowHome]) throws { try base.recoverWindowHomes(homes) }
         func move(window: UInt32, workspace: String) throws { try base.move(window: window, workspace: workspace) }
+        func moveFullscreen(window: WindowIdentity, workspace: String) throws {
+            fullscreenMoves.append(WindowHome(id: window.id, pid: window.pid, boot: window.boot, workspace: workspace, floating: false))
+            try base.move(window: window.id, workspace: workspace)
+        }
         func snapshot(workspace: String) throws -> String { try base.snapshot(workspace: workspace) }
         func restore(workspace: String, snapshot: String) throws {
             restores += 1
@@ -28,6 +33,204 @@ final class FullscreenResilienceTests: XCTestCase {
         func activateTarget(workspace: String, monitor: Int, window: UInt32?) throws {
             try base.activateTarget(workspace: workspace, monitor: monitor, window: window)
         }
+    }
+
+    private func ownHomeFixture() throws -> (DynamicEngine, MapBackend, RestoreTrackingBackend) {
+        let config = Configuration(backendPath: "/unused")
+        let display = Display(id: "external", monitor: 1, name: "Display", builtin: false, width: 1920, height: 1080)
+        var desktop = Desktop(displays: [display], visible: [1: "wb"], focusedMonitor: 1, focusedWindow: 2)
+        desktop.nativeVisible = [1: 2]
+        let backend = MapBackend(desktop)
+        backend.setWindows([
+            WindowInfo(id: 1, workspace: "wa", nativeFullscreen: true, nativeMonitor: 1),
+            WindowInfo(id: 2, workspace: "wb", nativeFullscreen: true, nativeMonitor: 1)
+        ])
+        var state = RuntimeState()
+        var map = SpaceMap(configuration: config)
+        map.version = 3
+        map.spaces = [
+            Space(id: "card-a", name: "A", row: 0, column: 0, workspace: "wa", preferredRole: "external"),
+            Space(id: "card-b", name: "B", row: 0, column: 1, workspace: "wb", preferredRole: "external")
+        ]
+        state.dynamicMap = map
+        let tracking = RestoreTrackingBackend(backend)
+        let engine = try DynamicEngine(configuration: config, state: state, backend: tracking, isProcessAlive: { _ in true })
+        try engine.refresh()
+        XCTAssertEqual(engine.map.fullscreens.count, 2)
+        XCTAssertTrue(engine.map.fullscreens.allSatisfy { $0.spaceID == $0.homeID })
+        _ = engine.consumeEvents()
+        return (engine, backend, tracking)
+    }
+
+    func testReturningOwnHomeFullscreenRecoversCardBeforeReconcilingOtherLinks() throws {
+        let (engine, backend, tracking) = try ownHomeFixture()
+        let before = engine.map
+        let cardA = try XCTUnwrap(before.spaces.first { $0.id == "card-a" })
+        let cardB = try XCTUnwrap(before.spaces.first { $0.id == "card-b" })
+        var returning = backend.screen.windows![0]
+        backend.setWindows([backend.screen.windows![1]])
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        XCTAssertNil(engine.map.spaces.first { $0.id == cardA.id }?.nativeWindow)
+        XCTAssertTrue(engine.map.spaces.first { $0.id == cardA.id }?.isDormant == true)
+        XCTAssertTrue(engine.consumeEvents().contains { $0.hasPrefix("fullscreen-removed reason=closed ") })
+
+        returning.workspace = cardB.workspace
+        backend.setWindows(backend.screen.windows! + [returning])
+        try engine.refresh()
+
+        XCTAssertEqual(tracking.fullscreenMoves, [WindowHome(id: returning.id, pid: returning.pid, boot: returning.boot, workspace: cardA.workspace, floating: false)])
+        let restored = try XCTUnwrap(engine.map.spaces.first { $0.id == cardA.id })
+        XCTAssertEqual(restored.id, cardA.id)
+        XCTAssertEqual(restored.rect, cardA.rect)
+        XCTAssertEqual(restored.workspace, cardA.workspace)
+        XCTAssertEqual(restored.nativeWindow, returning.identity)
+        XCTAssertFalse(restored.isDormant)
+        XCTAssertTrue(engine.map.spaces.first { $0.id == cardB.id } == cardB, "B must remain identical")
+        XCTAssertEqual(engine.map.spaces.map(\.id), before.spaces.map(\.id))
+        XCTAssertEqual(engine.map.fullscreens.sorted { $0.spaceID < $1.spaceID }, before.fullscreens.sorted { $0.spaceID < $1.spaceID })
+        let events = engine.consumeEvents()
+        XCTAssertTrue(events.contains("fullscreen-return window=1 pid=1 space=card-a"))
+        XCTAssertTrue(events.contains("fullscreen-restored window=1 pid=1 space=card-a"))
+    }
+
+    func testUnrememberedFullscreenDoesNotSplitAnotherFullscreenCard() throws {
+        let (engine, backend, tracking) = try ownHomeFixture()
+        let before = engine.map
+        backend.setWindows(backend.screen.windows! + [WindowInfo(id: 3, workspace: "wb", nativeFullscreen: true, nativeMonitor: 1)])
+
+        for sample in 1...3 {
+            try engine.refresh()
+            assertMapPreserved(engine, before, sample: sample)
+        }
+
+        XCTAssertTrue(tracking.fullscreenMoves.isEmpty)
+        XCTAssertEqual(engine.consumeEvents().filter { $0 == "fullscreen-unplaced window=3 pid=1 space=card-b" }.count, 1)
+    }
+
+    func testReturningExclusiveFullscreenMovesToOriginalHomeWorkspace() throws {
+        let (initial, backend) = try fixture()
+        let tracking = RestoreTrackingBackend(backend)
+        let engine = try DynamicEngine(configuration: initial.configuration, state: initial.state, backend: tracking, isProcessAlive: { _ in true })
+        let link = try XCTUnwrap(engine.map.fullscreens.first)
+        let exclusive = try XCTUnwrap(engine.map.spaces.first { $0.id == link.spaceID })
+        let home = try XCTUnwrap(engine.map.spaces.first { $0.id == link.homeID })
+        var returning = backend.screen.windows![0]
+        let remaining = Array(backend.screen.windows!.dropFirst())
+        backend.setWindows(remaining)
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        XCTAssertFalse(engine.map.spaces.contains { $0.id == exclusive.id })
+        returning.workspace = remaining[1].workspace
+        backend.setWindows(remaining + [returning])
+
+        try engine.refresh()
+
+        XCTAssertEqual(tracking.fullscreenMoves, [WindowHome(id: returning.id, pid: returning.pid, boot: returning.boot, workspace: home.workspace, floating: false)])
+        let restored = try XCTUnwrap(engine.map.spaces.first { $0.nativeWindow == returning.identity })
+        XCTAssertEqual(restored.id, exclusive.id)
+        XCTAssertEqual(restored.rect, exclusive.rect)
+        XCTAssertEqual(restored.workspace, home.workspace)
+        XCTAssertEqual(engine.map.fullscreens.first?.homeID, home.id)
+        XCTAssertEqual(engine.map.fullscreenPlaces, [])
+    }
+
+    func testFailedFullscreenReturnPreservesPlaceAndRetriesWithoutDuplicateEvents() throws {
+        let (engine, backend, tracking) = try ownHomeFixture()
+        let before = engine.map
+        var returning = backend.screen.windows![0]
+        backend.setWindows([backend.screen.windows![1]])
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        let absent = engine.map
+        let place = try XCTUnwrap(absent.fullscreenPlaces?.first)
+        XCTAssertEqual(place.space.nativeWindow, returning.identity)
+        _ = engine.consumeEvents()
+        returning.workspace = "wb"
+        returning.appName = "PRIVATE_APP_SENTINEL"
+        returning.title = "PRIVATE_TITLE_SENTINEL"
+        backend.setWindows(backend.screen.windows! + [returning])
+        backend.failWindow = returning.id
+
+        for _ in 0..<2 {
+            try engine.refresh()
+            XCTAssertEqual(engine.map, absent)
+            XCTAssertEqual(engine.map.fullscreenPlaces, [place])
+        }
+        let failed = engine.consumeEvents()
+        XCTAssertEqual(tracking.fullscreenMoves.count, 2)
+        XCTAssertEqual(failed.filter { $0 == "fullscreen-return-failed window=1 pid=1 space=card-a" }.count, 1)
+        XCTAssertFalse(failed.contains { $0.hasPrefix("fullscreen-restored ") || $0.hasPrefix("fullscreen-created ") || $0.hasPrefix("fullscreen-unplaced ") })
+        XCTAssertFalse(failed.contains { $0.contains("PRIVATE_APP_SENTINEL") || $0.contains("PRIVATE_TITLE_SENTINEL") })
+
+        backend.failWindow = nil
+        try engine.refresh()
+
+        let restored = try XCTUnwrap(engine.map.spaces.first { $0.id == "card-a" })
+        XCTAssertEqual(restored.rect, before.spaces.first { $0.id == "card-a" }?.rect)
+        XCTAssertEqual(restored.workspace, "wa")
+        XCTAssertEqual(restored.nativeWindow, returning.identity)
+        XCTAssertFalse(restored.isDormant)
+        XCTAssertEqual(engine.map.spaces.first { $0.id == "card-b" }, before.spaces.first { $0.id == "card-b" })
+        XCTAssertEqual(engine.map.spaces.count, before.spaces.count)
+        XCTAssertEqual(engine.map.fullscreenPlaces, [])
+        let events = engine.consumeEvents()
+        XCTAssertTrue(events.contains("fullscreen-return window=1 pid=1 space=card-a"))
+        XCTAssertTrue(events.contains("fullscreen-restored window=1 pid=1 space=card-a"))
+    }
+
+    func testReturningFullscreenAlreadyAtOwnHomeRestoresCurrentCardWithoutMove() throws {
+        let (initial, backend, tracking) = try ownHomeFixture()
+        var state = initial.state
+        let index = try XCTUnwrap(state.dynamicMap?.fullscreens.firstIndex { $0.identity.id == 1 })
+        state.dynamicMap!.fullscreens[index].manuallyEdited = true
+        let engine = try DynamicEngine(configuration: initial.configuration, state: state, backend: tracking, isProcessAlive: { _ in true })
+        let returning = backend.screen.windows![0]
+        backend.setWindows([backend.screen.windows![1]])
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        // The current card, including edits made while absent, is authoritative.
+        var absent = engine.state
+        let card = try XCTUnwrap(absent.dynamicMap?.spaces.firstIndex { $0.id == "card-a" })
+        absent.dynamicMap!.spaces[card].column = 4
+        absent.dynamicMap!.spaces[card].sourceID = "card-b"
+        let edited = absent.dynamicMap!.spaces[card]
+        let restoredEngine = try DynamicEngine(configuration: engine.configuration, state: absent, backend: tracking, isProcessAlive: { _ in true })
+        backend.setWindows(backend.screen.windows! + [returning])
+
+        try restoredEngine.refresh()
+
+        let restored = try XCTUnwrap(restoredEngine.map.spaces.first { $0.id == edited.id })
+        XCTAssertTrue(tracking.fullscreenMoves.isEmpty)
+        XCTAssertEqual(restored.rect, edited.rect)
+        XCTAssertEqual(restored.workspace, edited.workspace)
+        XCTAssertEqual(restored.sourceID, edited.sourceID)
+        XCTAssertEqual(restored.nativeWindow, returning.identity)
+        XCTAssertFalse(restored.isDormant)
+        let link = try XCTUnwrap(restoredEngine.map.fullscreens.first { $0.identity == returning.identity })
+        XCTAssertEqual(link.spaceID, edited.id)
+        XCTAssertEqual(link.homeID, edited.id)
+        XCTAssertTrue(link.manuallyEdited)
+        XCTAssertEqual(restoredEngine.map.fullscreenPlaces, [])
+        XCTAssertTrue(restoredEngine.consumeEvents().contains("fullscreen-restored window=1 pid=1 space=card-a"))
+    }
+
+    func testReturningFullscreenWithDeletedOwnCardUsesNewWindowBehavior() throws {
+        let (engine, backend, tracking) = try ownHomeFixture()
+        var returning = backend.screen.windows![0]
+        backend.setWindows([backend.screen.windows![1]])
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        XCTAssertNotNil(engine.map.fullscreenPlaces?.first)
+        try engine.removeEmptySpace("card-a")
+        let before = engine.map
+        _ = engine.consumeEvents()
+        returning.workspace = "wb"
+        backend.setWindows(backend.screen.windows! + [returning])
+
+        try engine.refresh()
+
+        XCTAssertTrue(tracking.fullscreenMoves.isEmpty)
+        XCTAssertEqual(engine.map, before)
+        XCTAssertFalse(engine.map.spaces.contains { $0.id == "card-a" })
+        let events = engine.consumeEvents()
+        XCTAssertEqual(events.filter { $0 == "fullscreen-unplaced window=1 pid=1 space=card-b" }.count, 1)
+        XCTAssertFalse(events.contains { $0.hasPrefix("fullscreen-restored ") || $0.hasPrefix("fullscreen-return ") })
     }
 
     private func fixture(alive: @escaping (Int32) -> Bool = { _ in true }) throws -> (DynamicEngine, MapBackend) {
