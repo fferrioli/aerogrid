@@ -287,7 +287,8 @@ class UpdateTests(unittest.TestCase):
                 else:
                     real_run(args, check=True, capture_output=True)
                     calls.append("validated")
-            with patch.object(worker, "verify_controller"), patch.object(worker, "download_archive", side_effect=lambda revision, archive, current_job: archive.touch()), patch.object(worker, "extract_archive", return_value=source), patch.object(worker, "run_command", side_effect=command), patch.object(worker, "await_handoff", side_effect=lambda *args: calls.append("handoff")), patch.object(worker.subprocess, "run", side_effect=external), patch.object(installer, "run", side_effect=installer_run):
+            # Keep this real ad-hoc workflow independent of the user's signing identities.
+            with patch.object(worker, "verify_controller"), patch.object(worker, "download_archive", side_effect=lambda revision, archive, current_job: archive.touch()), patch.object(worker, "extract_archive", return_value=source), patch.object(worker, "run_command", side_effect=command), patch.object(worker, "await_handoff", side_effect=lambda *args: calls.append("handoff")), patch.object(worker.subprocess, "run", side_effect=external), patch.object(installer, "run", side_effect=installer_run), patch.object(installer, "signing_identity", return_value=None):
                 worker.update(job, home)
             self.assertEqual((installer.SUPPORT / "state.json").read_bytes(), state)
             self.assertEqual((job / "backup/state.json").read_bytes(), state)

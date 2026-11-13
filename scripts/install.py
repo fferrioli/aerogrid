@@ -22,10 +22,22 @@ STAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 APPS = HOME / "Applications"
 SUPPORT = HOME / "Library/Application Support/AeroGrid"
 BACKUPS = SUPPORT / "backups" / STAMP
+SIGNING_NAME = "AeroGrid Local Code Signing"
 
 
 def run(*args):
     subprocess.run(args, check=True, timeout=60)
+
+
+def signing_identity():
+    result = subprocess.run(["security", "find-identity", "-p", "codesigning"],
+                            check=True, capture_output=True, text=True, timeout=10)
+    pattern = r'^\s*\d+\)\s+([0-9a-fA-F]{40})\s+"' + re.escape(SIGNING_NAME) + r'"(?:\s.*)?$'
+    # A trusted identity is listed again under "Valid identities only" with the same SHA-1.
+    identities = sorted({match.group(1).upper() for line in result.stdout.splitlines() if (match := re.fullmatch(pattern, line))})
+    if len(identities) > 1:
+        raise RuntimeError("More than one AeroGrid signing identity; run scripts/setup-signing.py --remove and set it up again.")
+    return identities[0] if identities else None
 
 
 def designated_requirement(path):
@@ -35,18 +47,23 @@ def designated_requirement(path):
     if result.returncode:
         return None
     for line in (result.stdout + result.stderr).splitlines():
-        if line.startswith("# designated => "):
-            return line.removeprefix("# designated => ")
+        line = line.removeprefix("# ")
+        if line.startswith("designated => "):
+            return line.removeprefix("designated => ")
     return None
 
 
-def reset_changed_adhoc_permissions(previous, current):
+def reset_changed_permissions(previous, current):
     identities = {"AeroGrid.app": "local.AeroGrid", "AeroGrid Backend.app": "local.AeroGrid.Backend"}
     for name, identifier in identities.items():
         requirement = current.get(name)
-        if requirement and requirement.startswith("cdhash ") and previous.get(name) != requirement:
+        prior = previous.get(name)
+        if requirement and requirement != prior and (prior or requirement.startswith("cdhash ")):
             # Reset before either new app requests approval; never reset after its prompt.
             run("tccutil", "reset", "Accessibility", identifier)
+
+
+reset_changed_adhoc_permissions = reset_changed_permissions
 
 
 def ensure_apps_stopped():
@@ -69,7 +86,7 @@ def validate_configuration(configuration):
             raise ValueError(result.stderr.strip() or "Rebuild AeroGrid before installing; its configuration validator is unavailable.")
 
 
-def bundle(directory, name, executable, identifier, source, resources):
+def bundle(directory, name, executable, identifier, source, resources, identity=None):
     target = directory / f"{name}.app"
     contents = target / "Contents"
     (contents / "MacOS").mkdir(parents=True)
@@ -98,7 +115,7 @@ def bundle(directory, name, executable, identifier, source, resources):
         plistlib.dump(info, handle)
     for resource in resources:
         shutil.copy2(resource, contents / "Resources" / resource.name)
-    run("codesign", "--force", "--deep", "--sign", "-", str(target))
+    run("codesign", "--force", "--deep", "--sign", identity or "-", str(target))
     run("codesign", "--verify", "--deep", str(target))
     return target
 
@@ -182,6 +199,7 @@ def commit_install(staged, configuration, aerospace_path, updated, manifest, ini
 
 def main():
     ensure_apps_stopped()
+    identity = signing_identity()
     previous_requirements = {name: designated_requirement(APPS / name) for name in ["AeroGrid.app", "AeroGrid Backend.app"]}
     cli = APPS / "AeroGrid Backend.app/Contents/Resources/aerospace"
     config_path = SUPPORT / "config.json"
@@ -210,18 +228,19 @@ def main():
         directory = pathlib.Path(temporary)
         backend = bundle(directory, "AeroGrid Backend", "AeroSpace", "local.AeroGrid.Backend",
                          ROOT / "vendor/AeroSpace/.build/release/AeroSpaceApp",
-                         [ROOT / "vendor/AeroSpace/docs/config-examples/default-config.toml", ROOT / "vendor/AeroSpace/.build/release/aerospace"])
-        app = bundle(directory, "AeroGrid", "AeroGrid", "local.AeroGrid", ROOT / ".build/release/AeroGrid", [ROOT / "scripts/update-worker.py"])
+                         [ROOT / "vendor/AeroSpace/docs/config-examples/default-config.toml", ROOT / "vendor/AeroSpace/.build/release/aerospace"], identity)
+        app = bundle(directory, "AeroGrid", "AeroGrid", "local.AeroGrid", ROOT / ".build/release/AeroGrid", [ROOT / "scripts/update-worker.py"], identity)
         current_requirements = {path.name: designated_requirement(path) for path in [backend, app]}
         ensure_apps_stopped()
         commit_install([backend, app], configuration, aerospace_path, updated, manifest, initial_config)
         try:
             for name in current_requirements:
                 run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-f", str(APPS / name))
-            reset_changed_adhoc_permissions(previous_requirements, current_requirements)
+            reset_changed_permissions(previous_requirements, current_requirements)
         except (subprocess.CalledProcessError, OSError) as error:
             print(f"Apps installed, but permission-record refresh failed: {error}. Remove and re-add the affected AeroGrid entry in Accessibility.", file=sys.stderr)
     print(f"Installed {APPS / 'AeroGrid.app'}\nInstalled {APPS / 'AeroGrid Backend.app'}\nConfiguration backup: {BACKUPS}")
+    print(f"Signing: {SIGNING_NAME}" if identity else "Signing: ad-hoc (run scripts/setup-signing.py for permissions that survive updates)")
 
 
 if __name__ == "__main__":
