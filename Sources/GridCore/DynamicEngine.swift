@@ -187,8 +187,15 @@ public final class DynamicEngine {
         state.lastDesktop = desktop
     }
     private func snapshot(_ space: Space) throws -> LayoutSnapshot { try LayoutSnapshot(json: backend.snapshot(workspace: space.workspace)) }
+    private func hasWindowMovedOut(of space: Space) -> Bool {
+        windows.contains {
+            !$0.nativeFullscreen && $0.nativeSpace != "fullscreen"
+                && $0.workspace != space.workspace && placeWorkspaces[$0.identity] == space.workspace
+        }
+    }
     private func capturePlaceTemplate(_ space: Space, layout: LayoutSnapshot?, preservingContractions: Bool) {
         guard !windows.isEmpty else { return }
+        let preserveContraction = preservingContractions && !hasWindowMovedOut(of: space)
         let captured: PlaceTemplate?
         if let identity = space.nativeWindow {
             guard map.fullscreens.contains(where: { $0.spaceID == space.id && $0.homeID == space.id && $0.identity == identity }) else {
@@ -196,7 +203,7 @@ public final class DynamicEngine {
                 return
             }
             guard let window = windows.first(where: { $0.identity == identity && $0.nativeFullscreen }), !window.bundleID.isEmpty else {
-                if !preservingContractions { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
+                if !preserveContraction { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
                 return
             }
             let ownHomes = Set(map.fullscreens.filter { $0.spaceID == $0.homeID }.map(\.identity))
@@ -208,11 +215,11 @@ public final class DynamicEngine {
             captured = layout.flatMap { PlaceTemplate.capture(snapshot: $0, windows: windows, now: Date()) }
         }
         guard let captured else {
-            if !preservingContractions { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
+            if !preserveContraction { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
             return
         }
         if let previous = map.placeTemplates?[space.id] {
-            if preservingContractions && space.nativeWindow == nil {
+            if preserveContraction && space.nativeWindow == nil {
                 let oldBundles = previous.slots.reduce(into: [String: Int]()) { $0[$1.bundleID, default: 0] += 1 }
                 let newBundles = captured.slots.reduce(into: [String: Int]()) { $0[$1.bundleID, default: 0] += 1 }
                 if captured.slots.count < previous.slots.count && newBundles.allSatisfy({ $0.value <= oldBundles[$0.key, default: 0] }) { return }
@@ -229,14 +236,17 @@ public final class DynamicEngine {
         guard !windows.isEmpty else { return }
         // A launch workspace is provisional while a saved place elsewhere is still unfulfilled.
         // Capturing it would make the matcher reserve those windows there on a later manual restore.
-        let provisional = Set(placeAssignments(automatic: false).compactMap { assignment -> String? in
+        // A source with a live departure is being rebuilt, so its old slots cannot reserve the destination's windows.
+        let movedOut = Set(map.spaces.filter { hasWindowMovedOut(of: $0) }.map(\.id))
+        let targets = placeTargets(automatic: false).filter { !movedOut.contains($0.spaceID) }
+        let provisional = Set(placeAssignments(automatic: false, targets: targets).compactMap { assignment -> String? in
             guard let window = windows.first(where: { $0.identity == assignment.window }),
                   let target = map.spaces.first(where: { $0.id == assignment.spaceID }),
                   window.workspace != target.workspace else { return nil }
             return window.workspace
         })
         // Inactive boards need the same accurate diagrams as the visible destination.
-        for space in map.spaces where space.nativeWindow == nil && !contents(of:space).isEmpty && (spaceIDs?.contains(space.id) ?? true) {
+        for space in map.spaces where space.nativeWindow == nil && (!contents(of: space).isEmpty || movedOut.contains(space.id)) && (spaceIDs?.contains(space.id) ?? true) {
             let json = try backend.snapshot(workspace:space.workspace)
             if !provisional.contains(space.workspace) {
                 capturePlaceTemplate(space, layout: try LayoutSnapshot(json: json), preservingContractions: true)
@@ -253,7 +263,7 @@ public final class DynamicEngine {
         }
     }
     private func rememberPlaceWorkspaces(_ inventory: [WindowInfo]) {
-        for window in inventory { placeWorkspaces[window.identity] = window.workspace }
+        placeWorkspaces = Dictionary(uniqueKeysWithValues: inventory.map { ($0.identity, $0.workspace) })
     }
     private func recordUserPlaced(_ identities: [WindowIdentity]) {
         guard var restoration = map.placeRestore else { return }
@@ -262,22 +272,34 @@ public final class DynamicEngine {
         }
         editMap { $0.placeRestore = restoration }
     }
-    private func trackPlaceMovement(_ desktop: Desktop) {
+    private func trackPlaceMovement(_ desktop: Desktop, inferUserPlacement: Bool) {
         let inventory = desktop.windows ?? []
         guard let boot = inventory.first?.boot ?? desktop.windowHomes?.first?.boot else { return }
         if map.placeRestore?.boot != boot {
             editMap { $0.placeRestore = PlaceRestoreState(boot: boot) }
-            placeWorkspaces = placeWorkspaces.filter { $0.key.boot == boot }
         }
+        guard inferUserPlacement else { return }
+        let linked = Set(map.fullscreens.map(\.identity))
         recordUserPlaced(inventory.filter { window in
             // Native fullscreen can be rediscovered in an uncertain workspace. Its reconciliation
             // owns that evidence; only normal windows provide reliable inferred user moves.
-            !window.nativeFullscreen && window.nativeSpace != "fullscreen"
+            !window.nativeFullscreen && window.nativeSpace != "fullscreen" && !linked.contains(window.identity)
                 && (placeWorkspaces[window.identity].map { $0 != window.workspace } ?? false)
         }.map(\.identity))
-        rememberPlaceWorkspaces(inventory)
     }
-    private func placeAssignments(automatic: Bool) -> [PlaceAssignment] {
+    private func windowedTemplate(_ template: PlaceTemplate) -> PlaceTemplate {
+        var result = template
+        result.fullscreen = nil
+        return result
+    }
+    private func placeTargets(automatic: Bool) -> [PlaceTarget] {
+        map.spaces.compactMap { space in
+            guard let template = map.placeTemplates?[space.id] else { return nil }
+            return PlaceTarget(spaceID: space.id, workspace: space.workspace,
+                               template: automatic ? template : windowedTemplate(template))
+        }
+    }
+    private func placeAssignments(automatic: Bool, targets: [PlaceTarget]) -> [PlaceAssignment] {
         let restored = Set(map.placeRestore?.restored ?? [])
         let userPlaced = Set(map.placeRestore?.userPlaced ?? [])
         let linked = Set(map.fullscreens.map(\.identity))
@@ -286,16 +308,17 @@ public final class DynamicEngine {
         }
         let eligible = Set(windows.filter {
             $0.ruled != true && !linked.contains($0.identity) && !userPlaced.contains($0.identity)
-                && (!automatic || (!$0.nativeFullscreen && !restored.contains($0.identity)))
+                && !$0.nativeFullscreen && $0.nativeSpace != "fullscreen"
+                && (!automatic || !restored.contains($0.identity))
         }.map(\.identity))
-        let targets = map.spaces.compactMap { space -> PlaceTarget? in
-            guard let template = map.placeTemplates?[space.id] else { return nil }
-            return PlaceTarget(spaceID: space.id, workspace: space.workspace, template: template)
-        }
         return PlaceMatcher.assign(candidates: present.filter { eligible.contains($0.identity) }, targets: targets, present: present)
     }
     private func applyPlaces(automatic: Bool) throws -> Int {
-        let assignments = placeAssignments(automatic: automatic)
+        let targets = placeTargets(automatic: automatic)
+        return try applyPlaceAssignments(placeAssignments(automatic: automatic, targets: targets), targets: targets)
+    }
+    /// Setups propagate failures to the organization transaction; session restoration records them and continues.
+    private func applyPlaceAssignments(_ assignments: [PlaceAssignment], targets: [PlaceTarget], transactional: Bool = false) throws -> Int {
         guard !assignments.isEmpty else { return 0 }
         var moved = 0
         var affected = Set<String>()
@@ -319,11 +342,12 @@ public final class DynamicEngine {
                 emit("place-restored \(details)")
             } catch {
                 emit("place-restore-failed \(details)")
+                if transactional { throw error }
             }
         }
         sync(try readDesktop())
         for space in map.spaces where affected.contains(space.id) && space.nativeWindow == nil {
-            guard let template = map.placeTemplates?[space.id] else { continue }
+            guard let template = targets.first(where: { $0.spaceID == space.id })?.template else { continue }
             var mapping: [TemplateSlot: WindowIdentity] = [:]
             var used = Set<WindowIdentity>()
             let members = windows.filter { $0.workspace == space.workspace && !$0.nativeFullscreen }.sorted { $0.id < $1.id }
@@ -334,10 +358,112 @@ public final class DynamicEngine {
             }
             guard let boot = members.first?.boot, let snapshot = template.instantiate(mapping, boot: boot) else { continue }
             do { try backend.restore(workspace: space.workspace, snapshot: snapshot.json()) }
-            catch { emit("place-layout-failed space=\(space.id.prefix(8))") }
+            catch {
+                emit("place-layout-failed space=\(space.id.prefix(8))")
+                if transactional { throw error }
+            }
         }
         sync(try readDesktop())
         return moved
+    }
+    public func makeSetup(name: String) throws -> Setup {
+        restoringPlaces = true
+        defer { restoringPlaces = false }
+        try refresh()
+        try captureVisibleLayouts()
+        let spaces = map.spaces.filter {
+            !$0.isDormant && (map.placeTemplates?[$0.id] != nil || !contents(of: $0).isEmpty)
+        }.map { space in
+            SetupSpace(spaceID: space.id, name: space.name, rect: space.rect, foldedRect: space.foldedRect,
+                       boardID: space.boardID, preferredRole: space.preferredRole, workspace: space.workspace,
+                       template: map.placeTemplates?[space.id])
+        }
+        return Setup(name: name, createdAt: now(), spaces: spaces)
+    }
+    public func applySetup(_ setup: Setup) throws -> SetupApplyResult {
+        guard Set(setup.spaces.map(\.spaceID)).count == setup.spaces.count,
+              setup.spaces.allSatisfy({ $0.rect.isValid && ($0.foldedRect?.isValid ?? true) }) else {
+            throw GridError.invalid("Invalid setup spaces")
+        }
+        restoringPlaces = true
+        defer { restoringPlaces = false }
+        var result = SetupApplyResult(moved: 0, missingBundleIDs: [])
+        var appliedEvents: [String] = []
+        try organize("Aplicar setup", recordsUserPlacement: false) {
+            try self.positionSetupSpaces(setup.spaces)
+            let targets = setup.spaces.compactMap { saved -> PlaceTarget? in
+                guard let template = saved.template,
+                      let space = self.map.spaces.first(where: { $0.id == saved.spaceID }) else { return nil }
+                return PlaceTarget(spaceID: space.id, workspace: space.workspace, template: self.windowedTemplate(template))
+            }
+            let present = self.windows.filter { !$0.bundleID.isEmpty }.map {
+                CandidateWindow(identity: $0.identity, bundleID: $0.bundleID, workspace: $0.workspace)
+            }
+            let linked = Set(self.map.fullscreens.map(\.identity))
+            let eligible = Set(self.windows.filter { $0.ruled != true && !linked.contains($0.identity) }.map(\.identity))
+            let assignments = PlaceMatcher.assign(candidates: present.filter { eligible.contains($0.identity) },
+                                                  targets: targets, present: present)
+            result.moved = try self.applyPlaceAssignments(assignments, targets: targets, transactional: true)
+            // Asking the same matcher to reserve all windows now at home reports occupied slots, including ruled ones.
+            let current = self.windows.filter { !$0.bundleID.isEmpty }.map {
+                CandidateWindow(identity: $0.identity, bundleID: $0.bundleID, workspace: $0.workspace)
+            }
+            var seen = Set<String>()
+            for target in targets {
+                let members = current.filter { $0.workspace == target.workspace }
+                let occupied = PlaceMatcher.assign(candidates: members, targets: [target], present: members)
+                let fulfilled = Set(occupied.map(\.slot))
+                let missing = target.template.slots.filter { !fulfilled.contains($0) }
+                for slot in missing where seen.insert(slot.bundleID).inserted { result.missingBundleIDs.append(slot.bundleID) }
+                let moved = assignments.filter { assignment in
+                    assignment.spaceID == target.spaceID && present.first { $0.identity == assignment.window }?.workspace != target.workspace
+                }.count
+                appliedEvents.append("setup-applied space=\(target.spaceID.prefix(8)) moved=\(moved) missing=\(missing.count)")
+            }
+        }
+        for event in appliedEvents { emit(event) }
+        return result
+    }
+    private func positionSetupSpaces(_ savedSpaces: [SetupSpace]) throws {
+        var next = map
+        let targetIDs = Set(savedSpaces.map(\.spaceID))
+        var placed = next.spaces.filter { !targetIDs.contains($0.id) && !$0.isDormant }
+        for saved in savedSpaces {
+            let index = next.spaces.firstIndex { $0.id == saved.spaceID }
+            var space = index.map { next.spaces[$0] } ?? Space(id: saved.spaceID, name: saved.name,
+                row: saved.rect.row, column: saved.rect.column, workspace: saved.workspace, preferredRole: saved.preferredRole)
+            if index == nil { space.userCreated = true; space.boardID = saved.boardID }
+            space.dormant = false
+            space.rect = saved.rect
+            let occupied = placed.filter { $0.board == space.board }.map(\.rect)
+            if occupied.contains(where: { $0.overlaps(space.rect) }) {
+                space.rect = SpacePlacement.nearestVacancy(near: space.rect, occupied: occupied,
+                                                         width: space.rect.width, height: space.rect.height)
+            }
+            space.foldedRect = saved.foldedRect
+            if let index { next.spaces[index] = space } else { next.spaces.append(space) }
+            placed.append(space)
+            if next.placeTemplates == nil { next.placeTemplates = [:] }
+            next.placeTemplates?[space.id] = saved.template
+        }
+        // Reserve the other cards first, so applying a setup never displaces a card outside it.
+        let combined = observed?.displays.count == 1
+        let projected = next.projectedSpaces(combined: combined)
+        var occupied = projected.filter { !targetIDs.contains($0.id) && !$0.isDormant }.compactMap {
+            combined ? $0.rect : $0.foldedRect
+        }
+        for saved in savedSpaces {
+            guard let index = next.spaces.firstIndex(where: { $0.id == saved.spaceID }) else { continue }
+            let space = next.spaces[index]
+            guard var rect = space.foldedRect ?? (combined ? projected.first { $0.id == space.id }?.rect : nil) else { continue }
+            if occupied.contains(where: { $0.overlaps(rect) }) {
+                rect = SpacePlacement.nearestVacancy(near: rect, occupied: occupied, width: rect.width, height: rect.height)
+            }
+            next.spaces[index].foldedRect = rect
+            occupied.append(rect)
+        }
+        try next.validate()
+        state.dynamicMap = next
     }
     public func restorePlaces() throws -> Int {
         restoringPlaces = true
@@ -357,7 +483,8 @@ public final class DynamicEngine {
         let before = observed
         let desktop = try readDesktop()
         guard desktop.windows != nil else { throw GridError.unavailable("Update AeroGrid Backend to enable the dynamic map") }
-        trackPlaceMovement(desktop)
+        let restarted = before?.backendSession != nil && before?.backendSession != desktop.backendSession
+        let recovering = restarted || map.pending != nil || blackoutSamples > 0
         // Changes made by fullscreen/topology reconciliation belong to the engine, not the user.
         defer { rememberPlaceWorkspaces(windows) }
         let knownBoot = desktop.windows?.first?.boot
@@ -393,7 +520,6 @@ public final class DynamicEngine {
             editMap { $0.pending = nil }
         }
         try upgradeSpatialMap()
-        let restarted = before?.backendSession != nil && before?.backendSession != desktop.backendSession
         reconcilingTopology = before?.topology != desktop.topology || restarted
         defer { reconcilingTopology = false }
         if restarted, let homes = before?.windowHomes {
@@ -406,6 +532,7 @@ public final class DynamicEngine {
             }
         }
         sync(try readDesktop())
+        trackPlaceMovement(observed ?? desktop, inferUserPlacement: !recovering)
         adoptUnmappedWorkspaces()
         try reconcileFullscreen(previous: before)
         if !restoringPlaces, let deadline = placeRestoreDeadline, now() < deadline {
@@ -996,11 +1123,12 @@ public final class DynamicEngine {
             }
         }
         return MapCheckpoint(spaces: map.spaces, families: map.families, fullscreens: map.fullscreens,
-                             homes: desktop.windowHomes?.filter { home in Set(normal.map(\.workspace)).contains(home.workspace) && desktop.windows?.contains(where: { $0.id == home.id && $0.pid == home.pid && $0.boot == home.boot }) == true } ?? [], layouts: layouts)
+                             homes: desktop.windowHomes?.filter { home in Set(normal.map(\.workspace)).contains(home.workspace) && desktop.windows?.contains(where: { $0.id == home.id && $0.pid == home.pid && $0.boot == home.boot }) == true } ?? [], layouts: layouts, placeTemplates: map.placeTemplates)
     }
     private func restore(_ checkpoint: MapCheckpoint, restoreWindows: Bool = true) throws {
         var next = map
         next.spaces = checkpoint.spaces; next.families = checkpoint.families; next.fullscreens = checkpoint.fullscreens
+        next.placeTemplates = checkpoint.placeTemplates
         if restoreWindows { next.layouts = checkpoint.layouts }
         let repaired = next.repairAdaptedGeometry()
         try next.validate()
@@ -1098,7 +1226,8 @@ public final class DynamicEngine {
         }
         let movedWindows = action.before.homes != action.after.homes
         try restore(action.before, restoreWindows: movedWindows || layoutOnlyChanged)
-        rebuildPlaceTemplates(before: current, after: try checkpoint())
+        // Setup Undo restores remembered absent slots too. Ordinary edits retain F1-1's live-template rebuilding.
+        if action.label != "Aplicar setup" { rebuildPlaceTemplates(before: current, after: try checkpoint()) }
         editMap { $0.undo.removeLast() }; try persist()
     }
     private func floatingGeometryMatches(_ first: [FloatingLayout], _ second: [FloatingLayout]) -> Bool {

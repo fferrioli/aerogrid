@@ -240,3 +240,160 @@ private final class PlaceRestoreBackend: Backend {
     }
     func layout(workspace: String, profile: String) throws {}
 }
+
+
+// Regressions from the independent F1-1 review.
+extension PlaceRestoreTests {
+    func testExternalMoveOfLastWindowClearsSourceTemplate() throws {
+        var editor = try XCTUnwrap(backend.model.screen.windows?.first)
+        editor.workspace = home.workspace
+        backend.model.setWindows([editor])
+        try engine.refresh()
+
+        try backend.model.move(window: editor.id, workspace: other.workspace)
+        try engine.refresh()
+
+        XCTAssertNil(engine.map.placeTemplates?[home.id])
+        XCTAssertTrue(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+        XCTAssertEqual(try engine.restorePlaces(), 0)
+        XCTAssertEqual(try backend.windows(workspace: other.workspace), [editor.id])
+    }
+
+    func testBlackoutRecoveryResetsUserPlacementBaseline() throws {
+        try engine.refresh()
+        let original = try XCTUnwrap(backend.model.screen.windows)
+        let editor = original[0]
+        backend.model.setWindows([])
+        try engine.refresh()
+        backend.model.setWindows(original.map { window in
+            var window = window
+            if window.id == editor.id { window.workspace = home.workspace }
+            return window
+        })
+
+        try engine.refresh()
+        XCTAssertFalse(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+        try engine.refresh()
+        XCTAssertFalse(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+
+        try backend.model.move(window: editor.id, workspace: other.workspace)
+        try engine.refresh()
+        XCTAssertTrue(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+    }
+
+    func testFoldMovementIsNotInferredAsUserPlacementOnNextRefresh() throws {
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows).map { window in
+            var window = window
+            window.workspace = home.workspace
+            return window
+        })
+        try engine.refresh()
+        let identities = try XCTUnwrap(backend.model.screen.windows).map(\.identity)
+        backend.model.screen.displays.removeAll { !$0.builtin }
+        backend.model.screen.visible = [1: home.workspace]
+        try engine.refresh()
+        XCTAssertFalse(engine.map.families.isEmpty)
+
+        try engine.refresh()
+
+        for identity in identities {
+            XCTAssertFalse(engine.map.placeRestore?.userPlaced.contains(identity) == true)
+        }
+    }
+
+    func testReviewExternalMoveRemovesSourceSlot() throws {
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows).map { window in
+            var window = window; window.workspace = home.workspace; return window
+        })
+        try engine.refresh()
+        let editor = try XCTUnwrap(backend.model.screen.windows?.first)
+        try backend.model.move(window: editor.id, workspace: other.workspace)
+        try engine.refresh()
+        XCTAssertTrue(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+        XCTAssertEqual(engine.map.placeTemplates?[home.id]?.slots.map(\.bundleID), ["app.browser"])
+    }
+
+    func testReviewBackendRecoveryIsNotUserPlacement() throws {
+        backend.model.screen.backendSession = "before"
+        try engine.refresh()
+        backend.model.screen.backendSession = "after"
+        let editor = try XCTUnwrap(backend.model.screen.windows?.first)
+        try backend.model.move(window: editor.id, workspace: home.workspace)
+        try engine.refresh()
+        XCTAssertEqual(backend.model.screen.windows?.first?.workspace, other.workspace)
+        XCTAssertFalse(engine.map.placeRestore?.userPlaced.contains(editor.identity) == true)
+        XCTAssertEqual(try engine.restorePlaces(), 2)
+    }
+
+    func testManualRestoreIgnoresFullscreenSlots() throws {
+        var state = engine.state
+        state.dynamicMap?.placeTemplates = [home.id: .fullscreen(slot: TemplateSlot(bundleID: "app.editor", ordinal: 0), capturedAt: clock)]
+        engine = try DynamicEngine(configuration: config, state: state, backend: backend, now: { self.clock })
+        XCTAssertEqual(try engine.restorePlaces(), 0)
+        XCTAssertEqual(backend.model.screen.windows?.first?.workspace, other.workspace)
+        XCTAssertFalse(backend.model.screen.windows?.first?.nativeFullscreen == true)
+        XCTAssertTrue(backend.fullscreenEntries.isEmpty)
+        try engine.undo()
+        XCTAssertEqual(backend.model.screen.windows?.first?.workspace, other.workspace)
+        XCTAssertFalse(backend.model.screen.windows?.first?.nativeFullscreen == true)
+    }
+
+    func testReviewFoldedPlacesSurviveNewBoot() throws {
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows).map { window in
+            var window = window; window.workspace = home.workspace; return window
+        })
+        try engine.refresh()
+        backend.model.screen.displays.removeAll { !$0.builtin }
+        backend.model.screen.visible = [1: home.workspace]
+        try engine.refresh()
+        let family = try XCTUnwrap(engine.map.families.first { $0.sourceID == home.id })
+        let childID = try XCTUnwrap(family.childIDs.first { $0 != home.id })
+        let child = try XCTUnwrap(engine.map.spaces.first { $0.id == childID })
+        XCTAssertEqual(try backend.windows(workspace: child.workspace), [102])
+        let saved = engine.state
+        backend.model.setWindows([
+            WindowInfo(id: 201, pid: 31, boot: "next", workspace: other.workspace, bundleID: "app.editor"),
+            WindowInfo(id: 202, pid: 32, boot: "next", workspace: other.workspace, bundleID: "app.browser")
+        ])
+        backend.model.trees.removeAll()
+        engine = try DynamicEngine(configuration: config, state: saved, backend: backend, now: { self.clock })
+        engine.placeRestoreDeadline = clock.addingTimeInterval(300)
+        try engine.refresh()
+        XCTAssertEqual(try backend.windows(workspace: child.workspace), [202])
+        XCTAssertEqual(try backend.windows(workspace: home.workspace), [201])
+    }
+}
+
+
+extension PlaceRestoreTests {
+    func testReviewShutdownThenReverseLaunchPreservesPlaces() throws {
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows).map { window in
+            var window = window; window.workspace = home.workspace; return window
+        })
+        backend.model.trees[home.workspace] = LayoutSnapshot(boot: "new", tree: .root([
+            LayoutNode(id: 101, pid: 21, weight: 2), LayoutNode(id: 102, pid: 22, weight: 3)
+        ], orientation: "v"))
+        try engine.refresh()
+        let original = try XCTUnwrap(engine.map.placeTemplates?[home.id])
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows).filter { $0.id == 101 })
+        try engine.refresh()
+        backend.model.setWindows([])
+        for _ in 0...DynamicEngine.blackoutLimit { try engine.refresh() }
+        XCTAssertEqual(engine.map.placeTemplates?[home.id], original)
+        let saved = engine.state
+        backend.model.setWindows([WindowInfo(id: 201, pid: 31, boot: "next", workspace: other.workspace, bundleID: "app.browser")])
+        backend.model.trees.removeAll()
+        engine = try DynamicEngine(configuration: config, state: saved, backend: backend, now: { self.clock })
+        engine.placeRestoreDeadline = clock.addingTimeInterval(300)
+        try engine.refresh()
+        XCTAssertEqual(engine.map.placeTemplates?[home.id], original)
+        backend.model.setWindows(try XCTUnwrap(backend.model.screen.windows) + [WindowInfo(id: 202, pid: 32, boot: "next", workspace: other.workspace, bundleID: "app.editor")])
+        try engine.refresh()
+        XCTAssertEqual(try backend.windows(workspace: home.workspace), [201, 202])
+        let restored = try XCTUnwrap(backend.restores.last?.1)
+        XCTAssertEqual(restored.tree.children?.map(\.id), [202, 201])
+        XCTAssertEqual(restored.tree.children?.map(\.weight), [2, 3])
+        XCTAssertEqual(backend.model.windowMoves.filter { $0 == 201 }.count, 1)
+        XCTAssertEqual(backend.model.windowMoves.filter { $0 == 202 }.count, 1)
+    }
+}

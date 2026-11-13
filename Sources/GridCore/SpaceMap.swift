@@ -140,6 +140,7 @@ public struct MapCheckpoint: Codable, Equatable {
     public var fullscreens: [FullscreenLink]
     public var homes: [WindowHome]
     public var layouts: [String: String]
+    public var placeTemplates: [String: PlaceTemplate]? = nil
 }
 public struct OrganizationUndo: Codable, Equatable {
     public var label: String
