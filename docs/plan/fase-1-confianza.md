@@ -133,7 +133,7 @@ Diseño en `docs/plan/decisiones/F1-0.md`. Contrato común: nombre de la identid
 **Especificación.**
 1. `signing_identity()`: corre `security find-identity -p codesigning`, devuelve la SHA-1 si hay exactamente una fila con el nombre exacto, `None` si no hay, y lanza `RuntimeError("More than one AeroGrid signing identity; run scripts/setup-signing.py --remove and set it up again.")` si hay más de una. Se consulta una vez, antes del staging.
 2. `bundle()` firma con `--sign <sha1>` si hay identidad, `--sign -` si no. Si `codesign` falla con identidad, la excepción aborta la instalación antes de `commit_install` (sin caer a ad-hoc).
-3. `reset_changed_adhoc_permissions` pasa a `reset_changed_permissions`: reinicia una app si su DR actual existe y difiere del anterior, sea `cdhash` o `certificate leaf`. Sin DR anterior (primera instalación) se reinicia, como hoy.
+3. `reset_changed_adhoc_permissions` pasa a `reset_changed_permissions`: reinicia una app si su DR actual existe, difiere del anterior **y** además hay DR anterior o el actual es `cdhash`. Así: ad-hoc ⇒ certificado reinicia una vez; certificado estable no reinicia; primera instalación ad-hoc reinicia como hoy; primera instalación con otra firma (sin DR anterior) no reinicia, como exige `testPermissionResetIsLimitedToChangedOwnedAdhocSignatures`, que sigue sin cambios salvo el nombre de la función (mantener un alias `reset_changed_adhoc_permissions` o actualizar solo la llamada).
 4. La salida final agrega una línea: `Signing: AeroGrid Local Code Signing` o `Signing: ad-hoc (run scripts/setup-signing.py for permissions that survive updates)`.
 
 **Reproducción primero.** Escribir los tests 2 y 3 y verlos fallar contra el instalador actual.
