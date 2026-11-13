@@ -22,6 +22,7 @@ public final class DynamicEngine {
     private var fullscreenReturnFailures: Set<WindowIdentity> = []
     private var fullscreenUnplaced: Set<WindowIdentity> = []
     private var fullscreenDesktops: [WindowIdentity: Desktop] = [:]
+    private var foldIdentityCollisions: Set<String> = []
     private var events: [String] = []
     public func consumeEvents() -> [String] { defer { events.removeAll() }; return events }
     private func emit(_ event: String) {
@@ -533,14 +534,33 @@ public final class DynamicEngine {
     }
     private func foldExternalSpaces() throws {
         let sources = map.spaces.filter { $0.preferredRole != "builtin" && $0.nativeWindow == nil && $0.sourceID == nil && $0.joinedWhileFolded != true }
-        for source in sources where !map.families.contains(where: { $0.sourceID == source.id }) {
-            guard !contents(of: source).isEmpty else { continue }
+        foldIdentityCollisions.formIntersection(sources.map(\.id))
+        for source in sources {
+            guard !map.families.contains(where: { $0.sourceID == source.id }), !contents(of: source).isEmpty else {
+                foldIdentityCollisions.remove(source.id)
+                continue
+            }
             let saved: LayoutSnapshot
             if let json = map.layouts[source.id], let cached = try? LayoutSnapshot(json: json), cached.boot == windows.first?.boot { saved = cached }
             else { saved = try snapshot(source) }
             let identities = Set(contents(of: source).map(\.identity))
-            guard let normalTree = saved.tree.retaining(identities, boot: saved.boot) else { continue }
+            guard let normalTree = saved.tree.retaining(identities, boot: saved.boot) else {
+                foldIdentityCollisions.remove(source.id)
+                continue
+            }
             let blocks = normalTree.blocks
+            let derivedIdentities = blocks.dropFirst().indices.map {
+                SpaceMap.derivedIdentity(sourceID: source.id, component: "block-\($0)")
+            }
+            if let collision = derivedIdentities.firstIndex(where: { identity in
+                map.spaces.contains { $0.id == identity.id || $0.workspace == identity.workspace }
+            }) {
+                if foldIdentityCollisions.insert(source.id).inserted {
+                    emit("fold-skipped reason=identity-taken space=\(source.id.prefix(8)) block=\(collision + 1)")
+                }
+                continue
+            }
+            foldIdentityCollisions.remove(source.id)
             guard blocks.count > 1 else { continue }
             let before = try checkpoint()
             var next = map
@@ -549,8 +569,7 @@ public final class DynamicEngine {
             for (index, block) in blocks.dropFirst().enumerated() {
                 let position = next.vacant(near: children.last!.0)
                 let app = windows.first { block.ids.contains($0.id) }?.appName ?? "Group \(index + 2)"
-                let identity = SpaceMap.derivedIdentity(sourceID: source.id, component: "block-\(index + 1)")
-                guard !next.spaces.contains(where: { $0.id == identity.id || $0.workspace == identity.workspace }) else { throw GridError.invalid("La identidad de un bloque está ocupada por otro espacio") }
+                let identity = derivedIdentities[index]
                 var child = Space(id: identity.id, name: "\(source.name) · \(app)", row: position.row, column: position.column,
                                   workspace: identity.workspace, preferredRole: source.preferredRole)
                 child.sourceID = source.id; child.preferredDisplay = source.preferredDisplay

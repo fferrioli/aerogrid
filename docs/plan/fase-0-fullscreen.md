@@ -635,7 +635,7 @@ Los tests del revisor (`testReview…`) son la reproducción de F0-11c y F0-11d.
 
 **Test existente a adaptar (cambio de especificación deliberado, listado acá).** `testDerivedIdentityCollisionFailsWithoutPartialMapOrMoves` (`DynamicEngineTests`) exigía que el choque lanzara. Pasa a llamarse `testDerivedIdentityCollisionSkipsFoldWithoutPartialMapOrMoves`:
 - `XCTAssertThrowsError(try unplug())` ⇒ `XCTAssertNoThrow(try unplug())`.
-- `XCTAssertEqual(engine.map.spaces, before)` ⇒ el mismo conjunto de IDs de espacios que antes (ninguno agregado ni quitado), y la fuente y el espacio reservado idénticos a antes. El resto del refresco ahora sí corre y puede marcar `dormant` otros espacios; eso no es un mapa parcial del pliegue.
+- `XCTAssertEqual(engine.map.spaces, before)` ⇒ el mismo conjunto de IDs de espacios que antes (ninguno agregado ni quitado), la fuente y el espacio reservado con el mismo `id`, `workspace`, `rect`, `sourceID` y `nativeWindow` que antes, y ningún espacio con `sourceID` de la fuente (corrección del orquestador: el refresco plegado asigna `foldedRect` y marca `dormant` legítimamente). El resto del refresco ahora sí corre y puede marcar `dormant` otros espacios; eso no es un mapa parcial del pliegue.
 - `families.isEmpty` y las ventanas 1 y 2 en el workspace de la fuente: sin cambios.
 - Agregar: un solo `fold-skipped reason=identity-taken`.
 Ningún otro test existente se adapta; si otro falla, detenerse e informar.

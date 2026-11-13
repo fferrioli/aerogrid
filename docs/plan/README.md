@@ -96,7 +96,7 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-11b Controlador: la ventana que vuelve recupera su tarjeta | SUB-impl | hecho | | 2026-11-13 |
 | F0-11c Controlador: el lugar recordado manda en todo el refresco (revisión) | SUB-impl | hecho | | 2026-11-13 |
 | F0-11d Backend: el movimiento conserva el foco y acepta la evidencia nativa (revisión) | SUB-impl | hecho | | 2026-11-13 |
-| F0-12a Controlador: el pliegue no detiene el refresco ante un choque de identidad (hallazgo de F0-9) | SUB-impl | en curso | | |
+| F0-12a Controlador: el pliegue no detiene el refresco ante un choque de identidad (hallazgo de F0-9) | SUB-impl | hecho | | 2026-11-13 |
 | F1-0 Firma local estable (decisión) | ORQ + HUM | pendiente | | |
 | F1-1 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
