@@ -182,11 +182,50 @@ public final class DynamicEngine {
         state.lastDesktop = desktop
     }
     private func snapshot(_ space: Space) throws -> LayoutSnapshot { try LayoutSnapshot(json: backend.snapshot(workspace: space.workspace)) }
+    private func capturePlaceTemplate(_ space: Space, layout: LayoutSnapshot?, preservingContractions: Bool) {
+        guard !windows.isEmpty else { return }
+        let captured: PlaceTemplate?
+        if let identity = space.nativeWindow {
+            guard map.fullscreens.contains(where: { $0.spaceID == space.id && $0.homeID == space.id && $0.identity == identity }) else {
+                editMap { $0.placeTemplates?.removeValue(forKey: space.id) }
+                return
+            }
+            guard let window = windows.first(where: { $0.identity == identity && $0.nativeFullscreen }), !window.bundleID.isEmpty else {
+                if !preservingContractions { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
+                return
+            }
+            let ownHomes = Set(map.fullscreens.filter { $0.spaceID == $0.homeID }.map(\.identity))
+            let ordinal = windows.filter {
+                $0.nativeFullscreen && $0.bundleID == window.bundleID && ownHomes.contains($0.identity) && $0.id < window.id
+            }.count
+            captured = .fullscreen(slot: TemplateSlot(bundleID: window.bundleID, ordinal: ordinal), capturedAt: Date())
+        } else {
+            captured = layout.flatMap { PlaceTemplate.capture(snapshot: $0, windows: windows, now: Date()) }
+        }
+        guard let captured else {
+            if !preservingContractions { editMap { $0.placeTemplates?.removeValue(forKey: space.id) } }
+            return
+        }
+        if let previous = map.placeTemplates?[space.id] {
+            if preservingContractions && space.nativeWindow == nil {
+                let oldBundles = previous.slots.reduce(into: [String: Int]()) { $0[$1.bundleID, default: 0] += 1 }
+                let newBundles = captured.slots.reduce(into: [String: Int]()) { $0[$1.bundleID, default: 0] += 1 }
+                if captured.slots.count < previous.slots.count && newBundles.allSatisfy({ $0.value <= oldBundles[$0.key, default: 0] }) { return }
+            }
+            // Keep idle refreshes stable instead of changing only the capture timestamp.
+            if previous.version == captured.version && previous.tree == captured.tree && previous.floating == captured.floating && previous.fullscreen == captured.fullscreen { return }
+        }
+        editMap {
+            if $0.placeTemplates == nil { $0.placeTemplates = [:] }
+            $0.placeTemplates?[space.id] = captured
+        }
+    }
     private func captureVisibleLayouts(spaceIDs: Set<String>? = nil) throws {
-        guard observed != nil else { return }
+        guard !windows.isEmpty else { return }
         // Inactive boards need the same accurate diagrams as the visible destination.
         for space in map.spaces where space.nativeWindow == nil && !contents(of:space).isEmpty && (spaceIDs?.contains(space.id) ?? true) {
             let json = try backend.snapshot(workspace:space.workspace)
+            capturePlaceTemplate(space, layout: try LayoutSnapshot(json: json), preservingContractions: true)
             if let previous = map.layouts[space.id] {
                 if previous == json { continue }
                 if let before = try? LayoutSnapshot(json: previous),
@@ -194,8 +233,15 @@ public final class DynamicEngine {
             }
             editMap { $0.layouts[space.id] = json }
         }
+        for space in map.spaces where space.nativeWindow != nil && (spaceIDs?.contains(space.id) ?? true) {
+            capturePlaceTemplate(space, layout: nil, preservingContractions: true)
+        }
     }
     public func refresh() throws {
+        editMap { map in
+            let ids = Set(map.spaces.map(\.id))
+            map.placeTemplates = map.placeTemplates.map { $0.filter { ids.contains($0.key) } }
+        }
         try repairAdaptedGeometryIfNeeded()
         let before = observed
         let desktop = try readDesktop()
@@ -859,6 +905,7 @@ public final class DynamicEngine {
         try refresh()
         guard let desktop = observed else { throw GridError.stale }
         let before = try checkpoint()
+        let previousTemplates = map.placeTemplates
         editMap { $0.pending = PendingOrganization(before: before, desiredHomes: []) }; try persist()
         do {
             try work()
@@ -870,8 +917,26 @@ public final class DynamicEngine {
                 map.undo.append(OrganizationUndo(label: label, before: before, after: after, topology: desktop.topology))
                 if map.undo.count > 20 { map.undo.removeFirst(map.undo.count - 20) }
             }
+            rebuildPlaceTemplates(before: before, after: after)
             try persist()
-        } catch { try restore(before); editMap { $0.pending = nil }; try persist(); throw error }
+        } catch {
+            try restore(before)
+            editMap { $0.pending = nil; $0.placeTemplates = previousTemplates }
+            try persist(); throw error
+        }
+    }
+    private func rebuildPlaceTemplates(before: MapCheckpoint, after: MapCheckpoint) {
+        guard !windows.isEmpty else { return }
+        let previousSpaces = Dictionary(uniqueKeysWithValues: before.spaces.map { ($0.id, $0) })
+        for space in after.spaces {
+            let previous = before.layouts[space.id].flatMap { try? LayoutSnapshot(json: $0) }
+            let current = after.layouts[space.id].flatMap { try? LayoutSnapshot(json: $0) }
+            let changed = previousSpaces[space.id] != space || previous?.boot != current?.boot || previous?.tree != current?.tree
+                || !floatingGeometryMatches(previous?.floating ?? [], current?.floating ?? [])
+            if changed { capturePlaceTemplate(space, layout: current, preservingContractions: false) }
+        }
+        let ids = Set(after.spaces.map(\.id))
+        editMap { $0.placeTemplates = $0.placeTemplates.map { $0.filter { ids.contains($0.key) } } }
     }
     public func undo() throws {
         try refresh()
@@ -907,6 +972,7 @@ public final class DynamicEngine {
         }
         let movedWindows = action.before.homes != action.after.homes
         try restore(action.before, restoreWindows: movedWindows || layoutOnlyChanged)
+        rebuildPlaceTemplates(before: current, after: try checkpoint())
         editMap { $0.undo.removeLast() }; try persist()
     }
     private func floatingGeometryMatches(_ first: [FloatingLayout], _ second: [FloatingLayout]) -> Bool {

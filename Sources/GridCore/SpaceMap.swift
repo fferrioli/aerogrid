@@ -159,6 +159,7 @@ public struct SpaceMap: Codable, Equatable {
     public var fullscreens: [FullscreenLink] = []
     public var fullscreenPlaces: [FullscreenPlace]? = nil
     public var layouts: [String: String] = [:]
+    public var placeTemplates: [String: PlaceTemplate]? = nil
     public var undo: [OrganizationUndo] = []
     public var pending: PendingOrganization?
     public var folded = false
