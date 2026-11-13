@@ -9,6 +9,7 @@ public final class DynamicEngine {
     private let store: Store?
     public static let absenceConfirmations = 3
     public static let exitConfirmations = 2
+    public static let unknownExitConfirmations = 5
     public static let maxFullscreenPlaces = 32
     /// Consecutive empty-inventory samples ignored as a blackout (10 s at the 2 s poll). Absence of live fullscreen
     /// windows keeps counting meanwhile without removing anything, so when every window really closed the cards go
@@ -17,6 +18,7 @@ public final class DynamicEngine {
     private var blackoutSamples = 0
     private let isProcessAlive: (Int32) -> Bool
     private var fullscreenSamples: [WindowIdentity: (absent: Int, windowed: Int)] = [:]
+    private var fullscreenDisagreements: Set<WindowIdentity> = []
     private var fullscreenDesktops: [WindowIdentity: Desktop] = [:]
     private var events: [String] = []
     public func consumeEvents() -> [String] { defer { events.removeAll() }; return events }
@@ -238,9 +240,11 @@ public final class DynamicEngine {
         reconcilingTopology = false
         sync(try backend.desktop())
         let actual = observed ?? desktop
+        let disputedSpaceIDs = Set(map.fullscreens.filter { fullscreenDisagreements.contains($0.identity) }.map(\.spaceID))
         editMap { map in
             for index in map.spaces.indices {
                 let space = map.spaces[index]
+                guard !disputedSpaceIDs.contains(space.id) else { continue }
                 let related = map.families.contains { $0.sourceID == space.id || $0.childIDs.contains(space.id) } || map.fullscreens.contains { $0.homeID == space.id }
                 if !space.userCreated && space.nativeWindow == nil && !related && !actual.visible.values.contains(space.workspace)
                     && !(actual.windows ?? []).contains(where: { $0.workspace == space.workspace }) {
@@ -338,11 +342,13 @@ public final class DynamicEngine {
     }
     private func reconcileFullscreen(previous: Desktop?) throws {
         // Entries are matched by owner and boot, not a reusable window number alone.
+        fullscreenDisagreements.formIntersection(map.fullscreens.map(\.identity))
         for link in map.fullscreens {
             guard let space = map.spaces.first(where: { $0.id == link.spaceID }) else { continue }
             let deferred = observed?.windowHomes?.contains { $0.id == link.identity.id && $0.pid == link.identity.pid && $0.boot == link.identity.boot } == true
             if deferred && !windows.contains(where: { $0.id == link.identity.id }) { fullscreenSamples[link.identity, default: (0, 0)].absent = 0; continue }
             if let window = windows.first(where: { $0.identity == link.identity }), window.nativeFullscreen {
+                fullscreenDisagreements.remove(link.identity)
                 fullscreenDesktops[link.identity] = observed
                 fullscreenSamples[link.identity] = (0, 0)
                 if link.spaceID == link.homeID, windows.contains(where: { $0.workspace == space.workspace && $0.identity != window.identity }) {
@@ -355,13 +361,22 @@ public final class DynamicEngine {
                 }
                 continue
             }
-            let present = windows.contains { $0.identity == link.identity }
             var samples = fullscreenSamples[link.identity, default: (0, 0)]
-            if present {
+            if let window = windows.first(where: { $0.identity == link.identity }) {
+                if window.nativeSpace == "fullscreen" {
+                    fullscreenSamples[link.identity] = (0, 0)
+                    if fullscreenDisagreements.insert(link.identity).inserted {
+                        emit("fullscreen-doubt kind=disagree \(detail(link.identity, link.spaceID))")
+                    }
+                    continue
+                }
                 samples.absent = 0; samples.windowed += 1
                 fullscreenSamples[link.identity] = samples
-                if samples.windowed < Self.exitConfirmations {
-                    emit("fullscreen-doubt kind=windowed count=\(samples.windowed) \(detail(link.identity, link.spaceID))")
+                let unknown = window.nativeSpace != nil && window.nativeSpace != "normal"
+                let confirmations = unknown ? Self.unknownExitConfirmations : Self.exitConfirmations
+                if samples.windowed < confirmations {
+                    let kind = unknown ? "windowed-unknown" : "windowed"
+                    emit("fullscreen-doubt kind=\(kind) count=\(samples.windowed) \(detail(link.identity, link.spaceID))")
                     continue
                 }
                 emit("fullscreen-exit \(detail(link.identity, link.spaceID))")
@@ -392,6 +407,7 @@ public final class DynamicEngine {
                 emit("fullscreen-removed reason=\(reason) \(detail(link.identity, link.spaceID))")
             }
             fullscreenSamples.removeValue(forKey: link.identity)
+            fullscreenDisagreements.remove(link.identity)
             if let window = windows.first(where: { $0.identity == link.identity }) {
                 if link.manuallyEdited, link.spaceID != link.homeID {
                     let workspace = "grid-space-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
