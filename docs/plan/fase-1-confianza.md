@@ -257,3 +257,37 @@ Diseño en `docs/plan/decisiones/F1-1.md`. Orden: F1-1b y F1-1c en paralelo; des
 7. Estado sin `placeRestore` ni `ruled` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
 
 **Verificación.** `swift test --filter PlaceRestoreTests`, luego `swift test`; `zsh scripts/build.sh` compila la app.
+
+---
+
+## F1-2 · Fichas
+
+Diseño en `docs/plan/decisiones/F1-2.md`. F1-2a (lógica) es de subagente; las vistas (selector en el organizador y en el menú, lista de apps faltantes) son del orquestador.
+
+### F1-2a · Setups: guardar y aplicar `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/Setups.swift` (nuevo), `Sources/GridCore/DynamicEngine.swift`, `Sources/AeroGrid/AppModel.swift` (solo cablear), `Tests/GridCoreTests/SetupTests.swift` (nuevo).
+
+**Especificación.**
+1. Tipos `Codable`/`Equatable`: `Setup { id: String; name: String; createdAt: Date; spaces: [SetupSpace] }`, `SetupSpace { spaceID; name; rect: SpaceRect; foldedRect: SpaceRect?; boardID: String?; preferredRole: String; workspace: String; template: PlaceTemplate? }`. Persistencia en `setups.json` del directorio de soporte con el `Store` existente (escritura atómica); archivo ausente = lista vacía. Nunca dentro de `state.json`.
+2. `DynamicEngine.makeSetup(name:) throws -> Setup`: refresca, captura distribuciones y arma un `SetupSpace` por cada espacio no dormido que tenga plantilla o contenido, con su plantilla actual.
+3. `DynamicEngine.applySetup(_:) throws -> SetupApplyResult` dentro de `organize("Aplicar setup")` (un solo paso de Deshacer):
+   - por cada `SetupSpace`: si existe un espacio con ese `spaceID`, ajustar `rect`/`foldedRect` (si no entra, `nearestVacancy`); si no existe, crearlo (`userCreated = true`) con ese ID, nombre, workspace, rol y rectángulo;
+   - `placeTemplates` de esos espacios = plantillas del setup;
+   - emparejar con `PlaceMatcher` usando como objetivos solo los espacios del setup y como candidatas las ventanas no `ruled` y sin vínculo fullscreen (sin restricción de sesión ni de `userPlaced`: es una acción explícita); mover, restaurar distribuciones y entrar en fullscreen con el mismo código que F1-1d (factorizarlo, sin duplicar);
+   - espacios y ventanas que no están en el setup: sin cambios;
+   - `SetupApplyResult { moved: Int; missingBundleIDs: [String] }` con los bundles de ranuras que quedaron sin ventana, sin repetir, en orden de aparición.
+4. `AppModel`: `setups` publicado (carga al iniciar), `saveSetup(name:)`, `applySetup(id:)` (guarda `missingBundleIDs` en una propiedad publicada para la vista), `renameSetup(id:name:)`, `deleteSetup(id:)`, `openApp(bundleID:)` con `NSWorkspace` (sin mostrar títulos), acción externa `apply-setup <id>`.
+5. Eventos: `setup-applied space=<prefijo> moved=<n> missing=<n>` sin nombres ni bundle IDs.
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`SetupTests`).**
+1. Guardar un mapa con dos espacios y aplicarlo tras reiniciar (boot nuevo, ventanas nuevas en otro workspace): espacios en su lugar, ventanas en sus espacios, distribución restaurada.
+2. `undo()` después de aplicar devuelve espacios, plantillas y ventanas al estado previo.
+3. App ausente ⇒ aparece en `missingBundleIDs` una sola vez.
+4. Ventana fuera del setup y espacio fuera del setup ⇒ sin cambios.
+5. Ventana `ruled` ⇒ no se mueve.
+6. `setups.json` ida y vuelta; archivo ausente ⇒ lista vacía; renombrar y borrar.
+
+**Verificación.** `swift test --filter SetupTests`, luego `swift test`; `zsh scripts/build.sh`.

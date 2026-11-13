@@ -105,8 +105,11 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F1-1b Plantillas y emparejador puro | SUB-impl | hecho | | 2026-11-13 |
 | F1-1c Backend: marca `ruled` | SUB-impl | hecho | | 2026-11-13 |
 | F1-1a Captura de plantillas | SUB-impl | hecho | | 2026-11-13 |
-| F1-1d Aplicación, ventana de inicio de sesión y «Restaurar lugares» | SUB-impl + ORQ | en curso | | |
+| F1-1d Aplicación, ventana de inicio de sesión y «Restaurar lugares» | SUB-impl + ORQ | hecho (simulado) | | 2026-11-13 |
+| F1-1 Revisión independiente | SUB-rev | en curso | | |
 | F1-2 Setups con nombre: diseño | ORQ | hecho | | 2026-11-13 |
+| F1-2a Setups: guardar y aplicar | SUB-impl | en curso | | |
+| F1-2b Vistas de setups | ORQ | pendiente | | |
 | F1-3 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
 | F3-1 … F3-5 | ver fase 3 | pendiente | | |
