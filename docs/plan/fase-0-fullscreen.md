@@ -326,7 +326,7 @@ El orquestador verifica cada hallazgo antes de actuar: un revisor también se eq
    | Prueba | Se espera |
    |---|---|
    | `debug-blind` 30 s, `forget: false` | La tarjeta no se mueve ni desaparece. Ningún `fullscreen-removed` en `diagnostics.log`. Mismo ID y rectángulo al terminar |
-   | `debug-blind` 30 s, `forget: true` (el bug original, forzado) | En el registro: `fullscreen-doubt`, luego `fullscreen-removed reason=closed`, y al vencer `fullscreen-restored`. Mismo ID y rectángulo al terminar; la ventana no queda en un espacio nuevo |
+   | `debug-blind` 30 s, `forget: true` (el bug original, forzado) | En el registro: `fullscreen-doubt`, luego `fullscreen-removed reason=closed`, y `fullscreen-restored` cuando la ventana vuelve a verse: al vencer si su Space es el actual; si no, al visitarlo (Accesibilidad no lista una ventana fullscreen de otro Space). Mismo ID y rectángulo al terminar; la ventana no queda en un espacio nuevo y **ninguna otra tarjeta cambia** (ver F0-11) |
    | Repetir la segunda con dos ventanas a la vez | Ídem para ambas |
 
    Si la segunda prueba deja la tarjeta en otro lugar, el arreglo no funciona: no seguir con la aceptación física.
@@ -467,5 +467,84 @@ Hay además un camino lateral: una ventana fullscreen recolectada (hogar retenid
 4. Los tests de F0-10b siguen en verde sin cambiar sus aserciones.
 
 **Invariantes.** Las de F0-10b, más: durante un desacuerdo, la tarjeta del vínculo conserva su contenido y es navegable (I2), y el mapa no cambia ni se persiste por esa ventana.
+
+**Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
+
+---
+
+## F0-11 · Hallazgo de la aceptación: la ventana que vuelve no encuentra su tarjeta
+
+**Qué pasó (2026-11-13, inyección en vivo, prueba 2 de F0-9, ya con F0-10 instalado).** `debug-blind` 30 s con `forget:true` sobre una ventana fullscreen (A) cuya tarjeta es su propio hogar (`spaceID == homeID`). El registro fue el esperado hasta la remoción: dos `fullscreen-doubt kind=absent`, `fullscreen-removed reason=closed`, la tarjeta quedó dormida en su lugar y ninguna otra cambió. Al vencer, A no volvió: Accesibilidad no lista una ventana fullscreen de un Space que no es el actual, y `forget:true` borró el hogar que la habría reportado como diferida. Al visitar su Space, el backend la registró en el workspace con foco, que era el de otra tarjeta fullscreen (B, también hogar propio). El controlador entonces partió la tarjeta de B (B se mudó a una tarjeta derivada nueva), creó otra para A (`fullscreen-created`, no `restored`) y dejó el casillero de B vacío. La tarjeta dormida de A siguió vacía.
+
+**Causa.**
+1. La remoción con `reason=closed` solo guarda un `FullscreenPlace` si `spaceID != homeID`. Una tarjeta que es su propio hogar se queda sin la identidad de su ventana: si la ventana vuelve a otro workspace, nada la asocia con su tarjeta.
+2. Ni siquiera con lugar recordado se corrige el workspace: la restauración usa el hogar del workspace donde el backend puso la ventana, que puede ser cualquiera.
+3. El primer bucle de `reconcileFullscreen` procesa los vínculos antes que las ventanas que vuelven, y parte una tarjeta de hogar propio ante **cualquier** otra ventana en su workspace, también una ventana fullscreen ajena que el backend dejó ahí por error.
+4. El backend no tiene cómo mover una ventana en fullscreen nativo entre workspaces: `move-window` la rechaza («Exit fullscreen before moving…»).
+
+**Principio del arreglo.** Una ventana fullscreen que vuelve con la misma identidad vuelve a **su** tarjeta y a **su** workspace, sin importar dónde la registró el backend, y antes de que el resto de los vínculos se reconcilie. Una ventana fullscreen nunca parte la tarjeta de otra. Es la defensa C completa: no depende de que la B (hogar en el backend) haya funcionado.
+
+**Contrato común.** Operación nueva del backend propio, con la misma identidad JSON que `move-window` (`{"id","pid","boot"}`):
+```
+grid-layout --workspace <destino> --data '{"id":…,"pid":…,"boot":"…"}' move-fullscreen-window
+```
+Del lado del controlador, `Backend.moveFullscreen(window: WindowIdentity, workspace: String) throws`. Dos tareas en paralelo (directorios disjuntos).
+
+---
+
+## F0-11a · Backend: mover una ventana fullscreen entre workspaces `[SUB-impl]` · tamaño S
+
+**Archivos.** `vendor/AeroSpace/Sources/AppBundle/command/impl/GridLayoutCommand.swift`, `vendor/AeroSpace/Sources/AppBundleTests/command/GridLayoutCommandTest.swift`. Parche regenerado con `scripts/regenerate-backend-patch.sh` y `UPSTREAM.md`.
+
+**Especificación.**
+1. Operación `move-fullscreen-window`, solo con backend propio (`gridOwnsBackendUI()`); sin él, el mismo error que una operación desconocida. Decodifica `GridMoveIdentity` de `--data` y resuelve el workspace destino como `move-window`.
+2. Falla sin cambiar nada si: la identidad no coincide (arranque, PID o ventana inexistente) ⇒ `Window identity changed`; la ventana no está en un `MacosFullscreenWindowsContainer` ⇒ `Window is not in native fullscreen`.
+3. Si la ventana ya está en el contenedor fullscreen del destino: éxito sin cambios.
+4. Si no: vincularla a `destino.macOsNativeFullscreenWindowsContainer` (`INDEX_BIND_LAST`, peso 1) conservando su `layoutReason`. No cambia el foco, no toca otras ventanas, no sale de fullscreen ni cambia Spaces de macOS, no toca hogares pendientes ni el plazo `.unknown`.
+5. `shouldResetClosedWindowsCache` sigue siendo verdadero para esta operación (como `move-window`).
+
+**Reproducción primero.** Escribir los tests y correrlos contra el código actual: deben fallar (operación desconocida). Pegar la salida en rojo.
+
+**Tests nuevos (`GridLayoutCommandTest`).**
+1. Ventana en el contenedor fullscreen del workspace `a` ⇒ queda en el contenedor fullscreen de `b`, con el mismo `layoutReason`; otra ventana de `a` (normal) no se mueve; el foco no cambia.
+2. Identidad con otro PID u otro arranque ⇒ error y sin cambios.
+3. Ventana normal (contenedor de mosaico) ⇒ error y sin cambios.
+4. Destino igual al actual ⇒ éxito y sin cambios.
+5. Sin backend propio ⇒ error de operación desconocida.
+
+**Invariantes.** La operación nunca saca una ventana de fullscreen ni mueve una ventana normal. AeroSpace independiente no cambia.
+
+**Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado y `git diff --stat`.
+
+---
+
+## F0-11b · Controlador: la ventana que vuelve recupera su tarjeta `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/Engine.swift` (protocolo `Backend`), `Sources/GridCore/DynamicEngine.swift` (`reconcileFullscreen`), `Sources/AeroGrid/Backend.swift` (`AeroSpaceBackend`), `Tests/GridCoreTests/FullscreenResilienceTests.swift`.
+
+**Especificación.**
+1. **Protocolo.** `func moveFullscreen(window: WindowIdentity, workspace: String) throws` en `Backend`, con implementación por defecto en la extensión que llama a `move(window: window.id, workspace:)` (como `moveVerified`). `AeroSpaceBackend` la implementa con `["grid-layout", "--workspace", workspace, "--data", <identidad JSON>, "move-fullscreen-window"]`, igual que `moveVerified`.
+2. **Memoria también para la tarjeta que es su propio hogar.** En la remoción con proceso vivo y mismo arranque, tras `absenceConfirmations`, guardar el `FullscreenPlace` también cuando `link.spaceID == link.homeID`. El resto de la remoción no cambia (la tarjeta queda, `nativeWindow = nil`, y después dormida).
+3. **Pase de retorno, al principio de `reconcileFullscreen`, antes del bucle de vínculos.** Para cada ventana con `nativeFullscreen == true`, sin vínculo en `map.fullscreens` y con un lugar recordado `p` (`p.space.nativeWindow == window.identity`):
+   - destino = `p.space.workspace`; actuar solo si algún espacio del mapa tiene ese workspace y la ventana está en otro;
+   - `try backend.moveFullscreen(window:workspace:)` y emitir `fullscreen-return` con `detail(window.identity, p.space.id)`;
+   - si falla: emitir `fullscreen-return-failed` (mismo detalle) una sola vez por identidad hasta que un intento salga bien o el lugar desaparezca; conservar el lugar; y en el segundo bucle de **este** llamado no crear ni restaurar esa ventana (se reintenta en el próximo refresco);
+   - si hubo al menos un movimiento: `sync(try readDesktop())` antes del bucle de vínculos.
+4. **Restauración en su propia tarjeta.** En el segundo bucle, si `remembered?.space.id == home.id` (la ventana está de nuevo en el workspace de su propia tarjeta): `shared` se calcula solo por otras ventanas del workspace, sin el término `remembered != nil`. Si no es compartido, vincular **la tarjeta actual** en su lugar (mismo `id`, `rect` y `workspace` del mapa actual, sin tocar `sourceID`), con `nativeWindow = identidad`, `FullscreenLink(spaceID: home.id, homeID: home.id, …, manuallyEdited: remembered.manuallyEdited)`, consumir el lugar y emitir `fullscreen-restored`. Si es compartido, el camino actual.
+5. **Una ventana fullscreen no parte la tarjeta de otra.** En el bucle de vínculos, la partición de una tarjeta de hogar propio cuenta solo las otras ventanas con `nativeFullscreen == false`. En el segundo bucle, si una ventana fullscreen sin vínculo no tiene hogar libre, emitir `fullscreen-unplaced` con `detail(identidad, <id de la tarjeta dueña del workspace>)` una sola vez por identidad (se olvida al vincularse o desaparecer), y seguir como hoy (sin tarjeta).
+
+**Reproducción primero.** Escribir los tests 1 y 2 y correrlos contra el código actual: deben fallar. Pegar la salida en rojo.
+
+**Tests nuevos (`FullscreenResilienceTests`).**
+1. **El caso real.** Dos tarjetas fullscreen de hogar propio: A (ventana 1, workspace `wa`) y B (ventana 2, `wb`). La ventana 1 falta `absenceConfirmations` muestras con proceso vivo ⇒ `fullscreen-removed reason=closed`. Después reaparece fullscreen en `wb`. Resultado: el backend recibió el movimiento de 1 a `wa`; la tarjeta A tiene el mismo `id` y `rect`, `nativeWindow` 1 y no está dormida; la tarjeta B idéntica a antes; ningún espacio nuevo; eventos `fullscreen-return` y `fullscreen-restored` para A.
+2. Una ventana fullscreen **sin** lugar recordado aparece en el workspace de B ⇒ B idéntica, ningún espacio nuevo, `fullscreen-unplaced` una sola vez en tres muestras.
+3. Lugar exclusivo (hogar compartido con ventanas normales): la ventana vuelve en otro workspace ⇒ se mueve al workspace del hogar y se restaura en el `rect` recordado con `homeID` del hogar original.
+4. Falla del movimiento (el backend falso lanza): sin cambios de mapa por esa ventana, lugar conservado, un solo `fullscreen-return-failed` en dos muestras; cuando el backend deja de fallar, se restaura como en el test 1.
+5. Vuelve en su propio workspace (el backend conservó el hogar): ningún movimiento, restaurada en su tarjeta con `fullscreen-restored`.
+6. Su tarjeta se borró mientras faltaba: ningún movimiento, y el comportamiento de una ventana fullscreen nueva.
+
+**Tests existentes a adaptar.** Solo los que afirman que la remoción de una tarjeta de hogar propio deja `fullscreenPlaces` vacío o que su reingreso emite `fullscreen-created`. Listarlos por nombre en el informe; cualquier otro que falle, detenerse e informar.
+
+**Invariantes.** Una ventana que vuelve con la misma identidad recupera su tarjeta (mismo `id`; mismo `rect` salvo que esté ocupado) y su workspace. Ninguna tarjeta cambia porque otra ventana fullscreen apareció en su workspace. Las de F0-3 y F0-10 siguen valiendo. Ningún evento lleva títulos ni nombres.
 
 **Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
