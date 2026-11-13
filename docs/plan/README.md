@@ -88,7 +88,7 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F0-6 Backend: salida de fullscreen corroborada | SUB-impl | hecho | | 2026-11-12 |
 | F0-7 Backend: inyección de falla en vivo | SUB-impl | hecho | | 2026-11-12 |
 | F0-8 Revisión independiente | SUB-rev | hecho | | 2026-11-12 |
-| F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | en curso | | |
+| F0-9 Docs, instalación, aceptación, PR | ORQ + HUM | hecho | | 2026-11-13 |
 | F0-10a Backend: evidencia nativa de tres estados (hallazgo de F0-9) | SUB-impl | hecho | | 2026-11-13 |
 | F0-10b Controlador: no confirmar salida contradicha | SUB-impl | hecho | | 2026-11-13 |
 | F0-10c Controlador: evidencia nativa al leer el inventario (revisión) | SUB-impl | hecho | | 2026-11-13 |

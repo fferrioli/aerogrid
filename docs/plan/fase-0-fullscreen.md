@@ -643,3 +643,26 @@ Ningún otro test existente se adapta; si otro falla, detenerse e informar.
 **Invariantes.** Un choque de identidad nunca detiene `refresh()` ni `organize`. Los tests de pliegue existentes siguen en verde sin cambiar aserciones. El evento no lleva títulos ni nombres.
 
 **Verificación.** `swift test --filter DynamicEngineTests`, luego `swift test` completo.
+
+---
+
+## F0-9 · Resultado de la aceptación (2026-11-13, build `96b4315`)
+
+**Inyección en vivo** (build `5f8f08e`; F0-12a solo cambia el pliegue):
+
+| Prueba | Resultado |
+|---|---|
+| `debug-blind` 30 s, `forget:false`, una ventana | Mapa idéntico, `state.json` sin reescribir, ningún evento `map:` |
+| `debug-blind` 30 s, `forget:true`, una ventana, con el foco del backend en otra tarjeta al visitar su Space | `doubt` ×2 → `removed reason=closed` → `fullscreen-return` → `fullscreen-restored`; diff del mapa completo vacío (mismo ID y rectángulo, ninguna otra tarjeta cambió) |
+| La anterior con dos ventanas a la vez | Ambas `removed` → `restored`; diff del mapa completo vacío |
+
+**Físicas:**
+
+| Prueba | Resultado |
+|---|---|
+| Salir de fullscreen (I4) | `fullscreen-exit` 2 s después de la primera duda; la ventana volvió a la distribución original de su tarjeta |
+| Cerrar una ventana fullscreen (I3) | `fullscreen-removed reason=closed` ~4–6 s después del cierre |
+| Bloqueo de ~20 min (I1, I5) | `gate: closed reason=locked` → `gate: open`; ningún `fullscreen-removed`; las tarjetas fullscreen conservan ID, rectángulo y ventana; `state.json` reescrito recién después de desbloquear |
+| Llegar a la tarjeta fullscreen con un clic (I2) | Confirmado por el usuario (los clics en tarjetas no se registran en el log; solo los gestos) |
+
+**Observaciones.** Tras olvidar la ventana enfocada con `debug-blind`, el foco lógico del backend quedó en otra ventana fullscreen sin cambiar de Space. La tarjeta de una app externa sigue sin plegarse mientras su identidad derivada la tenga una tarjeta adoptada (F0-12, causa de origen sin cambiar). La distribución del usuario quedó alterada por la prueba 2 previa a F0-11 y se reacomoda aparte. El seguimiento de una noche (F0-1) sigue pendiente y no bloquea el merge.

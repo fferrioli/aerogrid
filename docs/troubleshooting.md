@@ -54,7 +54,9 @@ To check the protection without locking the Mac, the owned backend can hide one 
 "$HOME/.local/bin/aerogrid-aerospace" grid-layout --data '{"windowID":ID,"seconds":30,"forget":false}' debug-blind
 ```
 
-The card should not move, and no other fullscreen card should change. With `"forget":true` the backend also drops its own retained record, reproducing the original failure: the log shows `fullscreen-doubt`, then `fullscreen-removed reason=closed`, and after expiry `fullscreen-restored` at the same place. Blindness lives only in memory, lasts 1–600 seconds, and `"seconds":0` cancels it. Unlike a real blackout, an expired blindness rediscovers the window by itself; a real background fullscreen window is rediscovered when its Space is visited.
+The card should not move, and no other fullscreen card should change. With `"forget":true` the backend also drops its own retained record, reproducing the original failure: the log shows `fullscreen-doubt`, then `fullscreen-removed reason=closed`, and `fullscreen-restored` at the same place once the window is observable again: at expiry if its Space is the current one, otherwise when its Space is visited (Accessibility does not list a fullscreen window on another Space). If the backend registers the returning window in another workspace, `fullscreen-return` precedes the restore; no other card should change. Blindness lives only in memory, lasts 1–600 seconds, and `"seconds":0` cancels it. Unlike a real blackout, an expired blindness rediscovers the window by itself; a real background fullscreen window is rediscovered when its Space is visited.
+
+If every action fails with «La identidad de un bloque está ocupada por otro espacio» (versions before this fix), close the window that was just opened in the affected app; current versions log `map: fold-skipped reason=identity-taken` and leave that card unfolded instead.
 
 If a card that was in fullscreen turned into an ordinary space while its window stayed in fullscreen (a version before this protection could do that), exit and re-enter fullscreen in that window once, then place its card again.
 
