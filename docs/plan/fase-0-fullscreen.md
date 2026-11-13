@@ -548,3 +548,57 @@ Del lado del controlador, `Backend.moveFullscreen(window: WindowIdentity, worksp
 **Invariantes.** Una ventana que vuelve con la misma identidad recupera su tarjeta (mismo `id`; mismo `rect` salvo que esté ocupado) y su workspace. Ninguna tarjeta cambia porque otra ventana fullscreen apareció en su workspace. Las de F0-3 y F0-10 siguen valiendo. Ningún evento lleva títulos ni nombres.
 
 **Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
+
+---
+
+## F0-11 · Revisión independiente: hallazgos y destino
+
+Los cinco se reprodujeron con un test que falla sobre `73d2dde`.
+
+| # | Hallazgo | Destino |
+|---|---|---|
+| 1 | Mover la ventana fullscreen **enfocada** deja el foco lógico en otra ventana del workspace origen. Es justo el caso real: la ventana que vuelve es la que el usuario está mirando | F0-11d |
+| 2 | Si la ventana reaparece en la lectura que precede al segundo bucle (después del pase de retorno), se restaura con el hogar del workspace equivocado y consume su memoria; ningún refresco posterior lo corrige | F0-11c |
+| 3 | La ventana recordada vuelve con `nativeFullscreen: false` y `nativeSpace: "fullscreen"`: el ajuste de F0-10c solo cubre vínculos, así que cuenta como intrusa normal y parte la tarjeta ajena | F0-11c (controlador) y F0-11d (el backend acepta moverla) |
+| 4 | Si el usuario borró la tarjeta mientras la ventana faltaba y la ventana vuelve a un workspace con hogar libre, la tarjeta borrada resucita con `fullscreen-restored` | F0-11c |
+| 5 | Si vuelve a un workspace que el mapa no conoce, `adoptUnmappedWorkspaces` crea una tarjeta antes del retorno y queda una tarjeta dormida de más | F0-11c |
+
+Los tests del revisor (`testReview…`) son la reproducción de F0-11c y F0-11d.
+
+---
+
+## F0-11c · Controlador: el lugar recordado manda en todo el refresco `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/FullscreenResilienceTests.swift`.
+
+**Especificación.**
+1. **Ancla.** Un `FullscreenPlace` vale solo mientras algún espacio del mapa tiene su workspace (`place.space.workspace`). Un único helper privado devuelve el lugar válido de una identidad, y todo el motor lo usa (puntos 2 a 5 y el segundo bucle). En la poda del principio del refresco (proceso vivo y mismo arranque), descartar también los lugares sin ancla. Una tarjeta borrada por el usuario, entonces, no resucita: la ventana se comporta como una fullscreen nueva.
+2. **Evidencia nativa.** En `readDesktop()`, el ajuste de F0-10c (`nativeFullscreen = true`, `nativeMonitor = nativeMonitor ?? monitor` cuando `nativeFullscreen == false` y `nativeSpace == "fullscreen"`) se aplica también a ventanas **sin vínculo con un lugar válido**. Para ellas no se emite `kind=disagree` ni se toca `fullscreenDisagreements`. Ventanas sin vínculo ni lugar: sin cambios (la evidencia sigue sin crear fullscreen).
+3. **Retorno también antes del segundo bucle.** El pase de retorno pasa a ser una función privada. Se llama al principio (como ahora) y otra vez después de la `sync(try readDesktop())` que precede al segundo bucle, seguida de otra `sync` si movió algo. Los fallos de ambas llamadas se acumulan en el mismo conjunto que el segundo bucle saltea. Además, el segundo bucle no vincula una ventana con lugar válido cuyo workspace difiere del de su lugar: queda para el próximo pase.
+4. **Adopción.** `adoptUnmappedWorkspaces` trata como no descubribles a las ventanas con lugar válido, igual que a las fullscreen con vínculo.
+
+**Reproducción primero.** Copiar los cuatro tests `testReview…` del controlador (y el gancho `onDesktop` de `RestoreTrackingBackend`) desde el diff que indica el brief, sin cambiar sus aserciones, y correrlos contra el código actual: deben fallar. Pegar la salida en rojo.
+
+**Tests.** Los cuatro de la revisión, más: una ventana **sin** lugar con `nativeFullscreen: false` y `nativeSpace: "fullscreen"` sigue siendo normal. Todos los tests de F0-3, F0-10 y F0-11b siguen en verde sin cambiar aserciones.
+
+**Invariantes.** Las de F0-11b. Ningún lugar sin ancla se usa. La evidencia nativa solo conserva un fullscreen conocido: un vínculo o un lugar válido.
+
+**Verificación.** `swift test --filter FullscreenResilienceTests`, luego `swift test` completo.
+
+---
+
+## F0-11d · Backend: el movimiento conserva el foco y acepta la evidencia nativa `[SUB-impl]` · tamaño S
+
+**Archivos.** `vendor/AeroSpace/Sources/AppBundle/command/impl/GridLayoutCommand.swift`, `vendor/AeroSpace/Sources/AppBundleTests/command/GridLayoutCommandTest.swift`. Parche regenerado y `UPSTREAM.md`.
+
+**Especificación.**
+1. **Foco.** Si la ventana movida es la enfocada, sigue enfocada después del movimiento (el foco la acompaña al workspace destino), sin activación nativa ni cambio de Space. Si la enfocada es otra, el foco no cambia (como ya prueba F0-11a).
+2. **Ventana `.standard` con evidencia nativa.** Con backend propio, si la ventana no está en un contenedor fullscreen ni de apps ocultas, su `layoutReason == .standard` y la clasificación nativa es `.fullscreen`, vincularla al contenedor fullscreen del destino con `layoutReason = .macos(prevParentKind: isFloating ? .floatingWindowsContainer : .tilingContainer)`, igual que la rama de `gridApplyRecoveredWindowHome`. Con otra clasificación, el error actual `Window is not in native fullscreen`, sin cambios. La clasificación se inyecta en los tests como en F0-10a (`nativeSpaceKind` con default a la envoltura). El controlador pide esto solo para ventanas que recuerda en fullscreen, así que la evidencia sigue sin crear un fullscreen de la nada.
+
+**Reproducción primero.** Copiar `testReviewMoveFocusedFullscreenKeepsFocusedWindow` desde el diff que indica el brief, escribir el test del punto 2 y correrlos: deben fallar. Pegar la salida en rojo.
+
+**Tests.** El de la revisión. Ventana `.standard` con `.fullscreen` ⇒ contenedor fullscreen del destino con `.macos(prevParentKind:)` según `floating`. Con `.normal` y con `.unknown` ⇒ error y sin cambios. Los cinco de F0-11a siguen en verde sin cambiar aserciones.
+
+**Invariantes.** Las de F0-11a, con una sola excepción: una ventana `.standard` con evidencia `.fullscreen` sí se mueve. Nunca sale de fullscreen una ventana.
+
+**Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado y `git diff --stat`.
