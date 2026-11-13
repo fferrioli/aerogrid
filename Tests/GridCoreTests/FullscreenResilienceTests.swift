@@ -79,6 +79,83 @@ final class FullscreenResilienceTests: XCTestCase {
         XCTAssertTrue(engine.map.layouts == before.layouts, "layouts changed at sample \(sample)", file: file, line: line)
     }
 
+    func testDisagreementInventoryPreservesExclusiveContentsAndNavigation() throws {
+        let (engine, backend) = try fixture()
+        let link = try XCTUnwrap(engine.map.fullscreens.first)
+        let exclusive = try XCTUnwrap(engine.map.spaces.first { $0.id == link.spaceID })
+        let home = try XCTUnwrap(engine.map.spaces.first { $0.id == link.homeID })
+        XCTAssertNotEqual(exclusive.id, home.id)
+        backend.screen.windows?[0].nativeFullscreen = false
+        backend.screen.windows?[0].nativeSpace = "fullscreen"
+        backend.screen.windows?[0].nativeMonitor = nil
+        backend.screen.windows?[0].monitor = 1
+
+        try engine.refresh()
+
+        XCTAssertEqual(engine.contents(of: exclusive).map(\.identity), [link.identity])
+        XCTAssertFalse(engine.contents(of: home).contains { $0.identity == link.identity })
+        let observed = try XCTUnwrap(engine.observed)
+        let selection = try NavigationSelection(map: engine.map, configuration: engine.configuration,
+                                                desktop: observed, scope: .active, displayID: "external")
+        XCTAssertTrue(selection.eligible["external"]?.contains(exclusive.id) == true)
+        XCTAssertEqual(selection.owners[exclusive.id], [link.identity])
+        XCTAssertEqual(observed.windows?.first { $0.identity == link.identity }?.nativeMonitor, 1)
+        XCTAssertEqual(engine.state.lastDesktop, observed)
+        XCTAssertEqual(backend.screen.windows?[0].nativeFullscreen, false, "inventory adjustment must only change the copy")
+    }
+
+    func testDisagreementInventoryDoesNotCaptureLayoutsOrAdoptWorkspace() throws {
+        for unknownWorkspace in [false, true] {
+            let config = Configuration(backendPath: "/unused")
+            let workspace = config.grids[0].cells[0].workspace
+            let display = Display(id: "external", monitor: 1, name: "Display", builtin: false, width: 1920, height: 1080)
+            var desktop = Desktop(displays: [display], visible: [1: workspace], focusedMonitor: 1, focusedWindow: 1)
+            desktop.nativeVisible = [1: 1]
+            let backend = MapBackend(desktop)
+            backend.setWindows([
+                WindowInfo(id: 1, workspace: workspace, nativeFullscreen: true, nativeMonitor: 1),
+                WindowInfo(id: 2, workspace: workspace, nativeFullscreen: true, nativeMonitor: 1)
+            ])
+            let engine = try DynamicEngine(configuration: config, backend: backend, isProcessAlive: { _ in true })
+            try engine.refresh()
+            XCTAssertEqual(engine.map.fullscreens.count, 2)
+            let before = engine.map
+            for index in 0..<2 {
+                backend.screen.windows?[index].nativeFullscreen = false
+                backend.screen.windows?[index].nativeSpace = "fullscreen"
+            }
+            if unknownWorkspace { backend.screen.windows?[0].workspace = "unmapped-fullscreen" }
+            backend.calls.removeAll()
+
+            for sample in 1...5 {
+                try engine.refresh()
+                assertMapPreserved(engine, before, sample: sample)
+                XCTAssertTrue(engine.map == before, "map changed at sample \(sample), unknown workspace: \(unknownWorkspace)")
+                XCTAssertFalse(backend.calls.contains { $0.hasPrefix("snapshot:") }, "fullscreen disagreement must not capture a normal layout")
+                XCTAssertFalse(engine.map.spaces.contains { $0.workspace == "unmapped-fullscreen" })
+            }
+        }
+    }
+
+    func testUnlinkedNativeSpaceEvidenceKeepsWindowNormal() throws {
+        let (engine, backend) = try fixture()
+        let before = engine.map
+        let window = try XCTUnwrap(backend.screen.windows?.first { $0.id == 2 })
+        let home = try XCTUnwrap(engine.map.spaces.first { $0.workspace == window.workspace && $0.nativeWindow == nil })
+        backend.screen.windows?[1].nativeSpace = "fullscreen"
+        _ = engine.consumeEvents()
+
+        for _ in 0..<5 {
+            try engine.refresh()
+            XCTAssertEqual(engine.map.fullscreens, before.fullscreens)
+            XCTAssertEqual(engine.map.spaces, before.spaces)
+            XCTAssertFalse(engine.map.spaces.contains { $0.nativeWindow == window.identity })
+            XCTAssertTrue(engine.contents(of: home).contains { $0.identity == window.identity })
+            XCTAssertEqual(engine.observed?.windows?.first { $0.identity == window.identity }?.nativeFullscreen, false)
+        }
+        XCTAssertFalse(engine.consumeEvents().contains { $0.hasPrefix("fullscreen-doubt kind=disagree ") || $0.hasPrefix("fullscreen-created ") })
+    }
+
     func testNativeSpaceDisagreementPreservesBothFullscreenCards() throws {
         let (engine, backend, tracking) = try disagreementFixture()
         let before = engine.map

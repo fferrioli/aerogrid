@@ -98,7 +98,7 @@ public final class DynamicEngine {
     }
     public func persist() throws { try map.validate(); try store?.save(state, name: "state.json") }
     public func importVisibleLayouts() throws {
-        let desktop = try backend.desktop()
+        let desktop = try readDesktop()
         let visible = Set(desktop.visible.values)
         for space in map.spaces where space.nativeWindow == nil && visible.contains(space.workspace) {
             if desktop.displays.count == 1 && desktop.displays.first?.builtin == true && space.preferredRole != "builtin" { continue }
@@ -127,6 +127,25 @@ public final class DynamicEngine {
         let inventory = (desktop ?? observed)?.windows ?? []
         if let native = space.nativeWindow { return inventory.filter { $0.identity == native && $0.nativeFullscreen } }
         return inventory.filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
+    }
+    private func readDesktop() throws -> Desktop {
+        var desktop = try backend.desktop()
+        fullscreenDisagreements.formIntersection(map.fullscreens.map(\.identity))
+        desktop.windows = desktop.windows?.map { window in
+            guard let link = map.fullscreens.first(where: { $0.identity == window.identity }) else { return window }
+            guard !window.nativeFullscreen, window.nativeSpace == "fullscreen" else {
+                fullscreenDisagreements.remove(window.identity)
+                return window
+            }
+            if fullscreenDisagreements.insert(window.identity).inserted {
+                emit("fullscreen-doubt kind=disagree \(detail(window.identity, link.spaceID))")
+            }
+            var adjusted = window
+            adjusted.nativeFullscreen = true
+            adjusted.nativeMonitor = window.nativeMonitor ?? window.monitor
+            return adjusted
+        }
+        return desktop
     }
     private func sync(_ desktop: Desktop) {
         observed = desktop
@@ -170,7 +189,7 @@ public final class DynamicEngine {
     public func refresh() throws {
         try repairAdaptedGeometryIfNeeded()
         let before = observed
-        let desktop = try backend.desktop()
+        let desktop = try readDesktop()
         guard desktop.windows != nil else { throw GridError.unavailable("Update AeroGrid Backend to enable the dynamic map") }
         let knownBoot = desktop.windows?.first?.boot
         editMap { map in
@@ -214,7 +233,7 @@ public final class DynamicEngine {
                 }
             }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
         adoptUnmappedWorkspaces()
         try reconcileFullscreen(previous: before)
         let shouldFold = desktop.displays.count == 1 && desktop.displays[0].builtin
@@ -228,7 +247,7 @@ public final class DynamicEngine {
                 for index in map.spaces.indices { map.spaces[index].joinedWhileFolded = nil }
             }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
         if map.initialized != true, let actual = observed {
             for display in actual.displays where actual.nativeVisible?[display.monitor] != nil {
                 if let target = currentSpace(on: display) { editMap { $0.connectedCursors[display.id] = target.id; $0.cursors[display.id] = target.id } }
@@ -238,13 +257,11 @@ public final class DynamicEngine {
         editMap { $0.initialized = true }
         try captureVisibleLayouts()
         reconcilingTopology = false
-        sync(try backend.desktop())
+        sync(try readDesktop())
         let actual = observed ?? desktop
-        let disputedSpaceIDs = Set(map.fullscreens.filter { fullscreenDisagreements.contains($0.identity) }.map(\.spaceID))
         editMap { map in
             for index in map.spaces.indices {
                 let space = map.spaces[index]
-                guard !disputedSpaceIDs.contains(space.id) else { continue }
                 let related = map.families.contains { $0.sourceID == space.id || $0.childIDs.contains(space.id) } || map.fullscreens.contains { $0.homeID == space.id }
                 if !space.userCreated && space.nativeWindow == nil && !related && !actual.visible.values.contains(space.workspace)
                     && !(actual.windows ?? []).contains(where: { $0.workspace == space.workspace }) {
@@ -290,13 +307,16 @@ public final class DynamicEngine {
                 try backend.focus(monitor: survivor.monitor, window: nil)
             }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
     }
     private func adoptUnmappedWorkspaces() {
         guard let desktop = observed else { return }
-        for workspace in Set(windows.map(\.workspace)).union(desktop.visible.values).sorted() where !map.spaces.contains(where: { $0.workspace == workspace }) {
+        // Known fullscreen windows keep their mapped home even if the inventory reports another workspace.
+        let linked = Set(map.fullscreens.map(\.identity))
+        let discoverable = windows.filter { !$0.nativeFullscreen || !linked.contains($0.identity) }
+        for workspace in Set(discoverable.map(\.workspace)).union(desktop.visible.values).sorted() where !map.spaces.contains(where: { $0.workspace == workspace }) {
             guard workspace.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { continue }
-            let window = windows.first { $0.workspace == workspace }
+            let window = discoverable.first { $0.workspace == workspace }
             let display = desktop.displays.first { $0.monitor == (window?.nativeMonitor ?? window?.monitor) }
                 ?? desktop.displays.first { desktop.visible[$0.monitor] == workspace }
                 ?? desktop.displays.first { $0.monitor == desktop.focusedMonitor } ?? desktop.displays.first
@@ -342,13 +362,11 @@ public final class DynamicEngine {
     }
     private func reconcileFullscreen(previous: Desktop?) throws {
         // Entries are matched by owner and boot, not a reusable window number alone.
-        fullscreenDisagreements.formIntersection(map.fullscreens.map(\.identity))
         for link in map.fullscreens {
             guard let space = map.spaces.first(where: { $0.id == link.spaceID }) else { continue }
             let deferred = observed?.windowHomes?.contains { $0.id == link.identity.id && $0.pid == link.identity.pid && $0.boot == link.identity.boot } == true
             if deferred && !windows.contains(where: { $0.id == link.identity.id }) { fullscreenSamples[link.identity, default: (0, 0)].absent = 0; continue }
             if let window = windows.first(where: { $0.identity == link.identity }), window.nativeFullscreen {
-                fullscreenDisagreements.remove(link.identity)
                 fullscreenDesktops[link.identity] = observed
                 fullscreenSamples[link.identity] = (0, 0)
                 if link.spaceID == link.homeID, windows.contains(where: { $0.workspace == space.workspace && $0.identity != window.identity }) {
@@ -363,13 +381,6 @@ public final class DynamicEngine {
             }
             var samples = fullscreenSamples[link.identity, default: (0, 0)]
             if let window = windows.first(where: { $0.identity == link.identity }) {
-                if window.nativeSpace == "fullscreen" {
-                    fullscreenSamples[link.identity] = (0, 0)
-                    if fullscreenDisagreements.insert(link.identity).inserted {
-                        emit("fullscreen-doubt kind=disagree \(detail(link.identity, link.spaceID))")
-                    }
-                    continue
-                }
                 samples.absent = 0; samples.windowed += 1
                 fullscreenSamples[link.identity] = samples
                 let unknown = window.nativeSpace != nil && window.nativeSpace != "normal"
@@ -435,7 +446,7 @@ public final class DynamicEngine {
                 }
             }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
         for window in windows where window.nativeFullscreen && !map.fullscreens.contains(where: { $0.identity == window.identity }) {
             guard let home = map.spaces.first(where: { $0.workspace == window.workspace && $0.nativeWindow == nil }) else { continue }
             let original = try snapshot(home)
@@ -470,7 +481,7 @@ public final class DynamicEngine {
                 map.fullscreenPlaces?.removeAll { $0.space.nativeWindow == window.identity }
             }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
     }
     private func foldExternalSpaces() throws {
         let sources = map.spaces.filter { $0.preferredRole != "builtin" && $0.nativeWindow == nil && $0.sourceID == nil && $0.joinedWhileFolded != true }
@@ -517,7 +528,7 @@ public final class DynamicEngine {
                 for (child, layout) in children { try backend.restore(workspace: child.workspace, snapshot: layout.json()); editMap { $0.layouts[child.id] = try? layout.json() } }
                 editMap { $0.pending = nil }; try persist()
             } catch { try restore(before); editMap { $0.pending = nil }; try persist(); throw error }
-            sync(try backend.desktop())
+            sync(try readDesktop())
         }
     }
     private func recomposeUneditedFamilies() throws {
@@ -578,7 +589,7 @@ public final class DynamicEngine {
             do { try work(); editMap { $0.pending = nil }; try persist() }
             catch { try restore(before); editMap { $0.pending = nil }; try persist(); throw error }
         }
-        sync(try backend.desktop())
+        sync(try readDesktop())
     }
     public func eligibleSpaces(on display: Display, desktop: Desktop? = nil) -> Set<String> {
         guard let desktop = desktop ?? observed else { return [] }
@@ -632,14 +643,14 @@ public final class DynamicEngine {
         return membership(oldWindows) == membership(newWindows)
     }
     private func refreshForNavigation(_ selection: NavigationSelection) throws {
-        let desktop = try backend.desktop()
+        let desktop = try readDesktop()
         guard canNavigateWithoutReconciliation(desktop) else { try refresh(); return }
         sync(desktop)
         try selection.validate(map: map, configuration: configuration, desktop: desktop)
         // Capture edits made since the last poll, without visiting unrelated spaces.
         let relevant = Set(selection.origin.values.map(\.spaceID) + selection.selected.values.map(\.spaceID))
         try captureVisibleLayouts(spaceIDs: relevant)
-        sync(try backend.desktop())
+        sync(try readDesktop())
     }
     public func commitNavigation(_ selection: NavigationSelection) throws {
         guard !selection.isAtOrigin else { return }
@@ -655,13 +666,13 @@ public final class DynamicEngine {
         let oldCursors = map.cursors, oldAnchors = map.anchors
         do {
             for (display, space) in moves {
-                guard try backend.desktop().topology == before.topology else { throw GridError.stale }
+                guard try readDesktop().topology == before.topology else { throw GridError.stale }
                 try show(space, on: display, prevalidated: true)
             }
             guard let origin = before.displays.first(where: { $0.id == selection.originDisplayID }),
-                  try backend.desktop().topology == before.topology else { throw GridError.stale }
+                  try readDesktop().topology == before.topology else { throw GridError.stale }
             try backend.focus(monitor: origin.monitor, window: nil)
-            sync(try backend.desktop())
+            sync(try readDesktop())
             editMap { map in
                 if map.anchors == nil { map.anchors = [:] }
                 for (id, entry) in selection.selected { map.anchors?[id] = entry }
@@ -672,17 +683,17 @@ public final class DynamicEngine {
             editMap { $0.anchors = oldAnchors }
             do { try restoreVisible(before,cursors:oldCursors) }
             catch {
-                if let actual = try? backend.desktop() { sync(actual) }
+                if let actual = try? readDesktop() { sync(actual) }
                 throw GridError.unavailable("El cambio falló y la recuperación quedó incompleta: \(error.localizedDescription)")
             }
-            sync(try backend.desktop()); try persist()
+            sync(try readDesktop()); try persist()
             throw failure
         }
     }
     private func show(_ space: Space, on display: Display, prevalidated: Bool = false) throws {
         if !prevalidated { try backend.validateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id) }
         try backend.activateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id)
-        let actual = try backend.desktop()
+        let actual = try readDesktop()
         if space.nativeWindow != nil {
             guard actual.nativeVisible?[display.monitor] == space.nativeWindow?.id else { throw GridError.unavailable("Fullscreen destination did not become visible") }
         } else {
@@ -694,7 +705,7 @@ public final class DynamicEngine {
         editMap { $0.cursors[display.id] = space.id }
     }
     private func restoreVisible(_ desktop: Desktop, cursors: [String: String]) throws {
-        let actual = try backend.desktop()
+        let actual = try readDesktop()
         for display in actual.displays {
             if let id = cursors[display.id], let space = map.spaces.first(where: { $0.id == id }) { try show(space, on: display) }
             else if let old = desktop.displays.first(where: { $0.id == display.id }), let ws = desktop.visible[old.monitor] {
@@ -712,7 +723,7 @@ public final class DynamicEngine {
               let display = desktop.displays.first(where: { $0.id == displayID }) ?? desktop.displays.first(where: { $0.monitor == desktop.focusedMonitor }) else { throw GridError.stale }
         if desktop.displays.contains(where: { $0.id != display.id && currentSpace(on: $0)?.id == space.id }) { throw GridError.invalid("Este espacio ya está visible en la otra pantalla") }
         let cursors = map.cursors
-        do { try show(space, on: display); sync(try backend.desktop()); try persist() }
+        do { try show(space, on: display); sync(try readDesktop()); try persist() }
         catch { try? restoreVisible(desktop, cursors: cursors); throw error }
     }
     public func selectGrid(offset: Int, displayID: String?) throws {
@@ -730,7 +741,7 @@ public final class DynamicEngine {
         let items = contents(of: space)
         guard !items.isEmpty else { return }
         let index = items.firstIndex { $0.id == desktop.focusedWindow } ?? 0
-        try backend.focus(window: items[(index + offset % items.count + items.count) % items.count].id); sync(try backend.desktop())
+        try backend.focus(window: items[(index + offset % items.count + items.count) % items.count].id); sync(try readDesktop())
     }
     public func saveProfile(displayID: String?) throws { try captureVisibleLayouts(); try persist() }
     public func moveFocusedWindow(gridID: String, cellID: String, windowOverride: UInt32?) throws {
@@ -738,12 +749,12 @@ public final class DynamicEngine {
         try moveWindow(window.identity, to: cellID)
     }
     public func focusWindow(_ identity: WindowIdentity) throws {
-        let desktop = try backend.desktop()
+        let desktop = try readDesktop()
         guard desktop.windows?.contains(where: { $0.identity == identity }) == true else { throw GridError.stale }
-        try backend.focus(window: identity.id); sync(try backend.desktop())
+        try backend.focus(window: identity.id); sync(try readDesktop())
     }
     private func checkpoint() throws -> MapCheckpoint {
-        let desktop = try backend.desktop()
+        let desktop = try readDesktop()
         var layouts = map.layouts
         let normal = map.spaces.filter { $0.nativeWindow == nil }
         for space in normal {
@@ -764,7 +775,7 @@ public final class DynamicEngine {
         let repaired = next.repairAdaptedGeometry()
         try next.validate()
         if !repaired.isEmpty { try backupBeforeAdaptedRepair() }
-        let actual = try backend.desktop()
+        let actual = try readDesktop()
         let live = Set((actual.windows ?? []).map(\.identity))
         let homes = checkpoint.homes.filter { live.contains(WindowIdentity(id: $0.id, pid: $0.pid, boot: $0.boot)) }
         if restoreWindows { try backend.recoverWindowHomes(homes) }
@@ -775,7 +786,7 @@ public final class DynamicEngine {
         }
         state.dynamicMap = next
         if !repaired.isEmpty { recoveryNotice = "Se repararon las posiciones adaptadas al recuperar la organización anterior." }
-        sync(try backend.desktop())
+        sync(try readDesktop())
     }
     private func organize(_ label: String, _ work: () throws -> Void) throws {
         try refresh()
@@ -784,8 +795,8 @@ public final class DynamicEngine {
         editMap { $0.pending = PendingOrganization(before: before, desiredHomes: []) }; try persist()
         do {
             try work()
-            guard try backend.desktop().topology == desktop.topology else { throw GridError.stale }
-            sync(try backend.desktop())
+            guard try readDesktop().topology == desktop.topology else { throw GridError.stale }
+            sync(try readDesktop())
             let after = try checkpoint()
             editMap { map in
                 map.pending = nil; map.layouts = after.layouts
