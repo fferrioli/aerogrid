@@ -68,7 +68,8 @@ def verify_identity(identity):
     try:
         with tempfile.TemporaryDirectory(prefix="aerogrid-signing-check-") as temporary:
             executable = str(Path(temporary) / "true")
-            shutil.copy2("/usr/bin/true", executable)
+            # Copy contents and mode only: system executables carry flags a user cannot set.
+            shutil.copy("/usr/bin/true", executable)
             run(CODESIGN, "--force", "--sign", identity, executable)
             result = run(CODESIGN, "-d", "-r-", executable)
             if "certificate leaf" not in result.stdout + result.stderr:

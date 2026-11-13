@@ -202,6 +202,16 @@ class SetupSigningIsolatedTests(unittest.TestCase):
         self.assertTrue(directories)
         self.assertTrue(all(not directory.exists() for directory in directories))
 
+    def test_verification_copies_system_executable_without_protected_flags(self):
+        # /usr/bin/true carries SIP's restricted flag; copying file flags fails for a normal user.
+        signing = module()
+        def fake_run(*command, input=None):
+            if command[1] == "-d":
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr='designated => identifier "true" and certificate leaf = H"aa"')
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        with patch.object(signing, "run", side_effect=fake_run):
+            signing.verify_identity(SHA1)
+
     def test_verification_failure_keeps_identity_and_reports_remove(self):
         signing = module()
         for failure in ("sign", "missing-certificate-leaf"):
