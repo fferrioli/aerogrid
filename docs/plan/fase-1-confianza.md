@@ -102,3 +102,51 @@ Depende de F1-1 (misma plantilla).
 ## F1-7 · Extraer el reconciliador `[SUB-impl]`, oportunista
 
 Al tocar `DynamicEngine` en F1-1 y F1-3, mover sin cambiar comportamiento la reconciliación de fullscreen y la de topología a archivos propios (extensiones o tipos colaboradores). Un commit de solo movimiento, con la suite en verde antes y después. No es un objetivo en sí: si no simplifica la tarea en curso, no se hace.
+
+---
+
+## F1-0 · Fichas
+
+Diseño en `docs/plan/decisiones/F1-0.md`. Contrato común: nombre de la identidad `AeroGrid Local Code Signing`; búsqueda con `security find-identity -p codesigning` (sin `-v`: el certificado no es de confianza y está bien), filas `N) <SHA1> "<nombre>"…` con el nombre exacto.
+
+### F1-0a · `scripts/setup-signing.py` `[SUB-impl]` · tamaño S
+
+**Archivos.** `scripts/setup-signing.py` (nuevo), `Tests/InstallerTests/test_setup_signing.py` (nuevo).
+
+**Especificación.**
+1. Sin argumentos: si la identidad ya existe en el llavero destino, informarlo y salir 0 sin cambios. Si no: en un `tempfile.TemporaryDirectory` con permisos 0700, generar con `/usr/bin/openssl` (ruta absoluta) una clave RSA 2048 y un certificado autofirmado de 3650 días con `basicConstraints = critical, CA:false`, `keyUsage = critical, digitalSignature`, `extendedKeyUsage = critical, codeSigning` y CN igual al nombre; exportar PKCS#12 con una contraseña aleatoria de un solo uso (`secrets`); importar con `security import <p12> -k <llavero> -P <contraseña> -T /usr/bin/codesign`. La contraseña nunca va a la salida ni a registros. Los temporales se borran siempre.
+2. Llavero destino: por defecto el de inicio de sesión (`security default-keychain -d user`); `--keychain PATH` lo reemplaza (lo usan los tests).
+3. Verificación final (solo con el llavero por defecto): firmar una copia de `/usr/bin/true` en un temporal con la SHA-1 de la identidad y comprobar que `codesign -d -r-` contiene `certificate leaf`. Si falla, informar y salir distinto de 0 (la identidad queda; `--remove` la borra).
+4. `--status`: imprime si existe y su SHA-1; sale 0 si existe, 1 si no. `--remove`: borra la identidad (`security delete-identity -Z <sha1> <llavero>`) si existe; idempotente.
+5. Mensajes en inglés, cortos; sin rutas personales salvo la del llavero. Nunca lo llaman `install.py`, `update-worker.py` ni `uninstall.py`.
+
+**Reproducción primero.** No aplica (archivo nuevo): escribir los tests primero y verlos fallar por el script inexistente.
+
+**Tests (`test_setup_signing.py`, con un llavero temporal creado por el test con `security create-keychain` y borrado al final; nunca el del usuario).** Crear ⇒ `find-identity -p codesigning <llavero>` lista exactamente una con el nombre; segunda ejecución ⇒ sin cambios y sigue una; `--status` 0 con la SHA-1 / 1 sin identidad; `--remove` la borra y es idempotente; ningún archivo `.pem`/`.p12` queda en el temporal; la contraseña no aparece en stdout/stderr.
+
+**Verificación.** `python3 -m unittest discover -s Tests/InstallerTests -v`.
+
+### F1-0b · Instalador: firmar con la identidad y reiniciar TCC solo si el DR cambió `[SUB-impl]` · tamaño S
+
+**Archivos.** `scripts/install.py`, `Tests/InstallerTests/test_installer.py`, y `Tests/UpdateTests/test_updates.py` solo si algún test existente lo necesita.
+
+**Especificación.**
+1. `signing_identity()`: corre `security find-identity -p codesigning`, devuelve la SHA-1 si hay exactamente una fila con el nombre exacto, `None` si no hay, y lanza `RuntimeError("More than one AeroGrid signing identity; run scripts/setup-signing.py --remove and set it up again.")` si hay más de una. Se consulta una vez, antes del staging.
+2. `bundle()` firma con `--sign <sha1>` si hay identidad, `--sign -` si no. Si `codesign` falla con identidad, la excepción aborta la instalación antes de `commit_install` (sin caer a ad-hoc).
+3. `reset_changed_adhoc_permissions` pasa a `reset_changed_permissions`: reinicia una app si su DR actual existe, difiere del anterior **y** además hay DR anterior o el actual es `cdhash`. Así: ad-hoc ⇒ certificado reinicia una vez; certificado estable no reinicia; primera instalación ad-hoc reinicia como hoy; primera instalación con otra firma (sin DR anterior) no reinicia, como exige `testPermissionResetIsLimitedToChangedOwnedAdhocSignatures`, que sigue sin cambios salvo el nombre de la función (mantener un alias `reset_changed_adhoc_permissions` o actualizar solo la llamada).
+4. La salida final agrega una línea: `Signing: AeroGrid Local Code Signing` o `Signing: ad-hoc (run scripts/setup-signing.py for permissions that survive updates)`.
+
+**Reproducción primero.** Escribir los tests 2 y 3 y verlos fallar contra el instalador actual.
+
+**Tests (`test_installer.py`, con `codesign` y `security` falsos en el `PATH` del subproceso cuando haga falta una identidad; el resto sigue firmando ad-hoc real como hoy).**
+1. Sin identidad: igual que hoy (ad-hoc, reinicio si cambió el `cdhash`).
+2. Con identidad y el mismo DR `certificate leaf` antes y después, con binarios distintos: `codesign` recibe `--sign <sha1>` y **no** se llama a `tccutil`.
+3. De ad-hoc a identidad (DR cambia de `cdhash` a `certificate leaf`): `tccutil reset` para las dos apps, una vez.
+4. Dos identidades con el mismo nombre: aborta sin cambiar archivos instalados.
+5. `codesign` falla con identidad: aborta sin cambiar archivos instalados y sin firmar ad-hoc.
+
+**Verificación.** `python3 -m unittest discover -s Tests/InstallerTests -v` y `… -s Tests/UpdateTests -v`.
+
+### F1-0c · Docs y verificación en vivo `[ORQ]` + `[HUM]`
+
+`README.md`, `BUILD-ON-ANOTHER-MAC.md`, `docs/updates.es.md`: el paso opcional, qué cambia (Accesibilidad persiste), qué no (Gatekeeper, política de seguridad), cómo quitarlo. En vivo: `setup-signing.py`, instalar (reinicia una vez y se aprueba), instalar otro build distinto ⇒ `--health` con `accessibilityGranted: true` sin aprobar de nuevo.
