@@ -246,6 +246,9 @@ struct GridLayoutCommand: Command {
     let args: GridLayoutCmdArgs
     var shouldResetClosedWindowsCache: Bool { !["status", "snapshot", "debug-blind"].contains(args.operation.val) }
     func run(_ env: CmdEnv, _ io: CmdIo) async -> BinaryExitCode {
+        await run(env, io, ownsBackendUI: gridOwnsBackendUI())
+    }
+    @MainActor func run(_ env: CmdEnv, _ io: CmdIo, ownsBackendUI: Bool) async -> BinaryExitCode {
         do {
             if args.operation.val == "debug-blind" {
                 guard gridOwnsBackendUI() else { return .fail(io.err("Unknown grid-layout operation")) }
@@ -289,6 +292,9 @@ struct GridLayoutCommand: Command {
                 }
                 return .succ
             }
+            if args.operation.val == "move-fullscreen-window" && !ownsBackendUI {
+                return .fail(io.err("Unknown grid-layout operation"))
+            }
             guard let target = args.resolveTargetOrReportError(env, io) else { return .fail }
             let ws = target.workspace
             switch args.operation.val {
@@ -298,6 +304,16 @@ struct GridLayoutCommand: Command {
                 guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
                 guard !(window.parent is MacosFullscreenWindowsContainer) else { return .fail(io.err("Exit fullscreen before moving this window into a different group")) }
                 return moveWindowToWorkspace(window, ws, io, focusFollowsWindow: false, failIfNoop: false)
+            case "move-fullscreen-window":
+                guard let data = args.data?.data(using: .utf8) else { return .fail(io.err("Expected window identity")) }
+                let identity = try JSONDecoder().decode(GridMoveIdentity.self, from: data)
+                guard identity.boot == gridBootIdentity(), let window = Window.get(byId: identity.id), window.app.pid == identity.pid else { return .fail(io.err("Window identity changed")) }
+                guard window.parent is MacosFullscreenWindowsContainer else { return .fail(io.err("Window is not in native fullscreen")) }
+                let destination = ws.macOsNativeFullscreenWindowsContainer
+                if window.parent !== destination {
+                    window.bind(to: destination, adaptiveWeight: 1, index: INDEX_BIND_LAST)
+                }
+                return .succ
             case "constraints":
                 var widths: [String: Double] = [:]
                 let boot = gridBootIdentity()

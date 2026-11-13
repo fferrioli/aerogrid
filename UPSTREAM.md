@@ -23,6 +23,8 @@ Additional fork fixes preserve unrelated monitors when placing an invisible work
 
 The dynamic-map upgrade extends `grid-layout` to version 2: window inventory with native visibility, `check-target`/`activate-target` selecting normal content or an exact fullscreen window, and `move-window` validating PID/boot before mutation. The backend ignores the `local.AeroGrid` auxiliary control app. Legacy operations remain available for existing diagnostics and snapshot regression tests.
 
+The owned backend additionally provides `move-fullscreen-window` with the same window/PID/boot identity validation. It rebinds only a window already in a native fullscreen container to the destination workspace's fullscreen container, preserving its layout reason without requesting focus, fullscreen, or native Space changes. Moving to the current workspace is a no-op; standalone AeroSpace rejects the operation.
+
 Explicitly restored roots preserve container structure/orientations and scale child weights proportionally. This prevents upstream normalization from rotating/flattening merged groups or changing internal ratios when their allocated size changes. Empty containers are still removed. Roots that have not been restored retain upstream normalization/resizing behavior.
 
 For the owned AeroGrid backend bundle only, the menu-bar extra and independent login registration are suppressed. A read-only `grid-layout management-status` reports readiness/enablement without a layout session, including when disabled. AeroGrid delegates actual pause/resume to the existing enable command. Standalone AeroSpace bundle presentation is preserved.
