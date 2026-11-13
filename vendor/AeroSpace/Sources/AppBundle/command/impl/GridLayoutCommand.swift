@@ -96,6 +96,8 @@ struct GridPendingHomePruning {
         boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
     gridPendingHomePruning.removeValue(forKey: window.windowId)
     gridMinimumWidthTracker.forget(windowID: window.windowId)
+    // A collected window is no longer observed, so its unknown-evidence interval does not continue.
+    gridFullscreenUnknownTracker.clear(windowID: window.windowId)
 }
 
 struct GridNativeRecoveryEvidence {
@@ -182,6 +184,7 @@ struct GridMinimumWidthTracker {
     gridPendingWindowHomes.removeValue(forKey: id)
     gridPendingHomePruning.removeValue(forKey: id)
     gridMinimumWidthTracker.forget(windowID: id)
+    gridFullscreenUnknownTracker.clear(windowID: id)
 }
 
 @MainActor func gridApplyRecoveredWindowHome(

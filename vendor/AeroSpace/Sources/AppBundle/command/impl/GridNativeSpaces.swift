@@ -40,12 +40,8 @@ struct GridFullscreenUnknownTracker {
 
     mutating func shouldExit(windowID: UInt32, now: TimeInterval) -> Bool {
         if let since = unknownSince[windowID] { return now - since >= gridFullscreenUnknownGrace }
-        if unknownSince.count >= 256,
-           let oldest = unknownSince.min(by: { lhs, rhs in
-               lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
-           })?.key {
-            unknownSince.removeValue(forKey: oldest)
-        }
+        // At capacity a new window waits for room; evicting would restart another window's running interval.
+        guard unknownSince.count < 256 else { return false }
         unknownSince[windowID] = now
         return false
     }

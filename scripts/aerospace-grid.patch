@@ -154,10 +154,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..7fd08a7
+index 0000000..3530f15
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,603 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -256,6 +256,8 @@ index 0000000..7fd08a7
 +        boot: gridBootIdentity(), workspace: workspace.name, floating: floating)
 +    gridPendingHomePruning.removeValue(forKey: window.windowId)
 +    gridMinimumWidthTracker.forget(windowID: window.windowId)
++    // A collected window is no longer observed, so its unknown-evidence interval does not continue.
++    gridFullscreenUnknownTracker.clear(windowID: window.windowId)
 +}
 +
 +struct GridNativeRecoveryEvidence {
@@ -342,6 +344,7 @@ index 0000000..7fd08a7
 +    gridPendingWindowHomes.removeValue(forKey: id)
 +    gridPendingHomePruning.removeValue(forKey: id)
 +    gridMinimumWidthTracker.forget(windowID: id)
++    gridFullscreenUnknownTracker.clear(windowID: id)
 +}
 +
 +@MainActor func gridApplyRecoveredWindowHome(
@@ -760,10 +763,10 @@ index 0000000..7fd08a7
 +}
 diff --git a/Sources/AppBundle/command/impl/GridNativeSpaces.swift b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
 new file mode 100644
-index 0000000..7d0fe29
+index 0000000..6a7033c
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,233 @@
 +import AppKit
 +import Common
 +import PrivateApi
@@ -806,12 +809,8 @@ index 0000000..7d0fe29
 +
 +    mutating func shouldExit(windowID: UInt32, now: TimeInterval) -> Bool {
 +        if let since = unknownSince[windowID] { return now - since >= gridFullscreenUnknownGrace }
-+        if unknownSince.count >= 256,
-+           let oldest = unknownSince.min(by: { lhs, rhs in
-+               lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
-+           })?.key {
-+            unknownSince.removeValue(forKey: oldest)
-+        }
++        // At capacity a new window waits for room; evicting would restart another window's running interval.
++        guard unknownSince.count < 256 else { return false }
 +        unknownSince[windowID] = now
 +        return false
 +    }
@@ -1809,10 +1808,10 @@ index 0000000..ac1db6e
 +}
 diff --git a/Sources/AppBundleTests/GridFullscreenExitTest.swift b/Sources/AppBundleTests/GridFullscreenExitTest.swift
 new file mode 100644
-index 0000000..6755e3c
+index 0000000..961aeeb
 --- /dev/null
 +++ b/Sources/AppBundleTests/GridFullscreenExitTest.swift
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,164 @@
 +@testable import AppBundle
 +import XCTest
 +
@@ -1933,11 +1932,36 @@ index 0000000..6755e3c
 +        XCTAssertTrue(tracker.shouldExit(windowID: 1, now: 20))
 +    }
 +
-+    func testUnknownTrackerBoundsEntriesTo256() {
++    func testUnknownTrackerAtCapacityKeepsRunningIntervals() {
 +        var tracker = GridFullscreenUnknownTracker()
 +        for id: UInt32 in 1...257 { XCTAssertFalse(tracker.shouldExit(windowID: id, now: 0)) }
-+        XCTAssertTrue(tracker.shouldExit(windowID: 2, now: 10), "A retained entry keeps its interval")
-+        XCTAssertFalse(tracker.shouldExit(windowID: 1, now: 10), "The oldest entry was evicted at capacity")
++        for id: UInt32 in 1...256 { XCTAssertTrue(tracker.shouldExit(windowID: id, now: 10), "id=\(id) keeps its interval") }
++        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 10), "A window beyond capacity waits for room")
++        tracker.clear(windowID: 1)
++        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 11))
++        XCTAssertTrue(tracker.shouldExit(windowID: 257, now: 21))
++    }
++
++    func testForgottenWindowHomeRestartsUnknownGrace() async throws {
++        let previousConfig = config
++        defer { config = previousConfig }
++        config.automaticallyUnhideMacosHiddenApps = true
++        let workspace = Workspace.get(byName: name)
++        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
++        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
++        window.isMacosFullscreenForTest = false
++        func sample(_ time: TimeInterval) async throws {
++            try await _normalizeLayoutReason(workspace: workspace, windows: [window], ownsBackendUI: true,
++                nativeSpaceKind: { _ in .unknown }, now: time)
++        }
++        try await sample(0)
++        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer)
++        // Collection and home recovery both end by forgetting the window's pending home: the observation stream breaks.
++        gridForgetRecoveredWindowHome(window.windowId)
++        try await sample(11)
++        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer, "A returning window starts a new unknown interval")
++        try await sample(21)
++        XCTAssertFalse(window.parent is MacosFullscreenWindowsContainer)
 +    }
 +
 +    func testNativeEvidenceDoesNotCreateFullscreenWithoutKnownHome() async throws {

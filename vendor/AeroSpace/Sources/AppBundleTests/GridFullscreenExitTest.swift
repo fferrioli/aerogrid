@@ -118,11 +118,36 @@ final class GridFullscreenExitTest: XCTestCase {
         XCTAssertTrue(tracker.shouldExit(windowID: 1, now: 20))
     }
 
-    func testUnknownTrackerBoundsEntriesTo256() {
+    func testUnknownTrackerAtCapacityKeepsRunningIntervals() {
         var tracker = GridFullscreenUnknownTracker()
         for id: UInt32 in 1...257 { XCTAssertFalse(tracker.shouldExit(windowID: id, now: 0)) }
-        XCTAssertTrue(tracker.shouldExit(windowID: 2, now: 10), "A retained entry keeps its interval")
-        XCTAssertFalse(tracker.shouldExit(windowID: 1, now: 10), "The oldest entry was evicted at capacity")
+        for id: UInt32 in 1...256 { XCTAssertTrue(tracker.shouldExit(windowID: id, now: 10), "id=\(id) keeps its interval") }
+        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 10), "A window beyond capacity waits for room")
+        tracker.clear(windowID: 1)
+        XCTAssertFalse(tracker.shouldExit(windowID: 257, now: 11))
+        XCTAssertTrue(tracker.shouldExit(windowID: 257, now: 21))
+    }
+
+    func testForgottenWindowHomeRestartsUnknownGrace() async throws {
+        let previousConfig = config
+        defer { config = previousConfig }
+        config.automaticallyUnhideMacosHiddenApps = true
+        let workspace = Workspace.get(byName: name)
+        let window = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
+        window.layoutReason = .macos(prevParentKind: .floatingWindowsContainer)
+        window.isMacosFullscreenForTest = false
+        func sample(_ time: TimeInterval) async throws {
+            try await _normalizeLayoutReason(workspace: workspace, windows: [window], ownsBackendUI: true,
+                nativeSpaceKind: { _ in .unknown }, now: time)
+        }
+        try await sample(0)
+        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer)
+        // Collection and home recovery both end by forgetting the window's pending home: the observation stream breaks.
+        gridForgetRecoveredWindowHome(window.windowId)
+        try await sample(11)
+        XCTAssertTrue(window.parent is MacosFullscreenWindowsContainer, "A returning window starts a new unknown interval")
+        try await sample(21)
+        XCTAssertFalse(window.parent is MacosFullscreenWindowsContainer)
     }
 
     func testNativeEvidenceDoesNotCreateFullscreenWithoutKnownHome() async throws {
