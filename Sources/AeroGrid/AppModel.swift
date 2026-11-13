@@ -80,6 +80,10 @@ final class AppModel: ObservableObject {
         backend = AeroSpaceBackend(path: config.backendPath); management = backend
         paused = try store.load(WindowManagerPreferences.self,name:"control.json")?.paused ?? false
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend, store: store)
+        if let login = LoginSession.consoleLoginDate() {
+            let deadline = login.addingTimeInterval(300)
+            engine.placeRestoreDeadline = Date() < deadline ? deadline : nil
+        }
         input = GestureInput(configuration: config)
         try store.save(config, name: "config.json")
         input.target = { [weak self] in self?.targetDisplay() }
@@ -512,6 +516,7 @@ final class AppModel: ObservableObject {
             if let id = UInt32(args[1]), let window = desktop?.windows?.first(where: { $0.id == id }) { moveWindow(window.identity, to: args[2]) }
         case "arrange" where args.count == 4: arrange(args[1], layout: args[2], orientation: args[3])
         case "reunite" where args.count == 2: reunite(args[1])
+        case "restore-places": restorePlaces()
         case "undo": undoOrganization()
         case "recover": recover()
         case "permissions": requestPermission()
@@ -576,6 +581,16 @@ final class AppModel: ObservableObject {
     func reunite(_ preview: ReunitePreview) {
         perform { try $0.reunite(sourceID: preview.sourceID, expectedOwners: Set(preview.windows.map(\.identity))) }
         reunitePreview = nil
+    }
+    func restorePlaces() {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        var count = 0
+        perform(completion: { [weak self] error in
+            if error == nil { self?.message = "Lugares restaurados · \(count) ventana(s) movida(s)" }
+        }) { engine in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            count = try engine.restorePlaces()
+        }
     }
     func undoOrganization() { perform { try $0.undo() } }
     func createSpace(near: String? = nil, moving: WindowIdentity? = nil, displayID: String? = nil) {

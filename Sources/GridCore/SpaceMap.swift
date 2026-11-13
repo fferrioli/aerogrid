@@ -19,13 +19,15 @@ public struct WindowInfo: Codable, Equatable, Identifiable {
     public var nativeFullscreen: Bool
     public var nativeMonitor: Int?
     public var monitor: Int?
+    public var ruled: Bool?
     public var nativeSpace: String?
     public var identity: WindowIdentity { WindowIdentity(id: id, pid: pid, boot: boot) }
-    public init(id: UInt32, pid: Int32 = 1, boot: String = "test", workspace: String, floating: Bool = false, title: String = "Window", appName: String = "App", bundleID: String = "test", nativeFullscreen: Bool = false, nativeMonitor: Int? = nil, nativeSpace: String? = nil) {
+    public init(id: UInt32, pid: Int32 = 1, boot: String = "test", workspace: String, floating: Bool = false, title: String = "Window", appName: String = "App", bundleID: String = "test", nativeFullscreen: Bool = false, nativeMonitor: Int? = nil, nativeSpace: String? = nil, ruled: Bool? = nil) {
         self.id = id; self.pid = pid; self.boot = boot; self.workspace = workspace; self.floating = floating
         self.title = title; self.appName = appName; self.bundleID = bundleID
         self.nativeFullscreen = nativeFullscreen; self.nativeMonitor = nativeMonitor
         self.nativeSpace = nativeSpace
+        self.ruled = ruled
     }
 }
 public struct LayoutNode: Codable, Equatable {
@@ -149,6 +151,18 @@ public struct PendingOrganization: Codable, Equatable {
     public var before: MapCheckpoint
     public var desiredHomes: [WindowHome]
 }
+public struct PlaceRestoreState: Codable, Equatable {
+    public var boot: String
+    public var restored: [WindowIdentity]
+    public var userPlaced: [WindowIdentity]
+
+    public init(boot: String, restored: [WindowIdentity] = [], userPlaced: [WindowIdentity] = []) {
+        self.boot = boot
+        self.restored = restored
+        self.userPlaced = userPlaced
+    }
+}
+
 public struct SpaceMap: Codable, Equatable {
     public var version = 2
     public var spaces: [Space]
@@ -159,6 +173,7 @@ public struct SpaceMap: Codable, Equatable {
     public var fullscreens: [FullscreenLink] = []
     public var fullscreenPlaces: [FullscreenPlace]? = nil
     public var layouts: [String: String] = [:]
+    public var placeRestore: PlaceRestoreState? = nil
     public var placeTemplates: [String: PlaceTemplate]? = nil
     public var undo: [OrganizationUndo] = []
     public var pending: PendingOrganization?
