@@ -7,7 +7,7 @@ final class GestureInput {
     var onContact: ((ContactGestureEvent) -> Void)?
     var onSwipe: ((RecognizedSwipe) -> Void)?
     var onDiagnostic: ((String) -> Void)?
-    var onTrace: ((String) -> Void)?
+    var onTapDisabled: (() -> Void)?
     var onPacket: (([String:Any]) -> Void)?
     var target: (() -> String?)?
     var shouldSuppressScroll: (() -> Bool)?
@@ -19,7 +19,6 @@ final class GestureInput {
     private var scrollGuard = GestureScrollGuard()
     private var reportedSwipe = false
     private var generation = 0
-    private var lastContactSummary = ""
     private var aliases:[String:Int] = [:]
     private var sequence = 0
     private var nextAlias = 0
@@ -52,10 +51,11 @@ final class GestureInput {
     }
     func reset() {
         settlementTimer?.cancel(); settlementTimer = nil
-        generation += 1; contact.reset(); scrollGuard.reset(); reportedSwipe = false; lastContactSummary = ""; onContact?(.cancelled)
+        generation += 1; contact.reset(); scrollGuard.reset(); reportedSwipe = false; onContact?(.cancelled)
     }
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            onTapDisabled?()
             reset()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
@@ -110,19 +110,6 @@ final class GestureInput {
             onPacket(packet)
             if aliases.count > 256 && contacts.allSatisfy({ $0.phase == .ended || $0.phase == .cancelled }) { aliases.removeAll() }
         }
-        let generation = self.generation
-        let moving = contacts.filter { !$0.resting && $0.phase != .ended && $0.phase != .cancelled }.count
-        let resting = contacts.filter(\.resting).count
-        let lifted = contacts.filter { $0.phase == .ended }.count
-        let summary = "active=\(moving) resting=\(resting) lifted=\(lifted) phase=\(nsEvent.phase.rawValue)"
-        if summary != lastContactSummary || !events.isEmpty {
-            lastContactSummary = summary
-            let trace = "Input t=\(String(format:"%.3f",nsEvent.timestamp)) \(summary) recognized=\(events.count)"
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == generation else { return }
-                self.onTrace?(trace)
-            }
-        }
         deliver(events)
         // Touch packets still reach macOS; only scroll events belonging to our assigned
         // contact cohort are consumed. Native Mission Control conflicts remain explicit settings.
@@ -147,7 +134,6 @@ final class GestureInput {
         let timestamp = ProcessInfo.processInfo.systemUptime
         let events = contact.advance(timestamp:timestamp)
         updateSettlementTimer()
-        if let reason = contact.decisionReason { onTrace?("Input settlement: \(reason)") }
         scrollGuard.observe(contact.scrollContext,events:events,bindings:configuration.bindings,
             enabled:shouldSuppressScroll?() ?? false,timestamp:timestamp)
         if let onPacket {

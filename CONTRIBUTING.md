@@ -21,6 +21,18 @@ Root tests exercise the core model, layout/navigation behavior, organization tra
 
 Recorded gesture fixtures use aliased contact identifiers and contain no window content. Replay is useful regression evidence; it does not prove physical gesture behavior.
 
+To check local placement history with the installed frontend and its matching backend, build the disposable fixture and run the opt-in smoke:
+
+```sh
+mkdir -p dist
+swiftc -parse-as-library Tests/Fixtures/windows.swift -o dist/GridFixture
+python3 scripts/live-diagnostics-smoke.py
+```
+
+Leave local diagnostics enabled. During the countdown, switch to an existing empty AeroGrid cell on a normal macOS desktop and close the organizer. The smoke starts three GridFixture windows, changes fullscreen and discovery state only for a fixture window, and uses the running frontend to open that fixture's fullscreen card. It checks frames, native membership, command correlation, unattributed occupancy during the injected disappearance, recovery, and local file permissions. It closes its fixture on exit. Use a disposable session or test cell and leave the desktop idle during the run.
+
+To verify the installed opt-out, disable **Record local window and Space diagnostics**, reproduce a fixture change, and check that both history files remain byte-for-byte unchanged. Restart AeroGrid and confirm the toggle stays off. Turn it back on to check that the next observable state starts new checkpoints.
+
 For frontend CPU changes, `AeroGrid --benchmark-idle REPORT.json` measures process CPU and model publications with visible settings, hidden settings, and no UI. It uses 12 fictional windows, a fake backend, and a deliberately frequent 0.5-second poll. Do not equate these short synthetic measurements with a long-running user's Activity Monitor reading. Unchanged polls must produce no UI publications; real focus/layout changes and corroborated release settlement must still propagate.
 
 ## Validate behavior on hardware

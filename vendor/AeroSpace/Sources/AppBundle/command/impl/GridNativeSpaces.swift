@@ -54,8 +54,11 @@ struct GridFullscreenUnknownTracker {
 @MainActor var gridFullscreenUnknownTracker = GridFullscreenUnknownTracker()
 
 @MainActor func gridNativeSpaceKind(windowID: UInt32, displays: [GridNativeDisplay]?) -> GridNativeSpaceKind {
-    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber]
-    return gridClassifyNativeSpace(windowSpaces: spaces?.map(\.uint64Value), displays: displays)
+    gridClassifyNativeSpace(windowSpaces: gridWindowSpaceIDs(windowID), displays: displays)
+}
+
+@MainActor func gridWindowSpaceIDs(_ windowID: UInt32) -> [UInt64]? {
+    (AeroGridCopyWindowSpaces(windowID) as? [NSNumber])?.map(\.uint64Value)
 }
 
 @MainActor func gridNativeSpaceKind(windowID: UInt32) -> GridNativeSpaceKind {
@@ -94,8 +97,12 @@ struct GridFullscreenUnknownTracker {
 }
 @MainActor func gridNativeMonitor(windowID: UInt32, displays: [GridNativeDisplay]?) -> MonitorInfo? {
     guard let displays else { return nil }
-    let spaces = AeroGridCopyWindowSpaces(windowID) as? [NSNumber] ?? []
-    guard let display = displays.first(where: { d in spaces.contains { value in d.spaces.contains { $0.id == value.uint64Value && $0.type == 4 } } }) else { return nil }
+    return gridNativeMonitor(windowSpaces: gridWindowSpaceIDs(windowID), displays: displays)
+}
+
+@MainActor func gridNativeMonitor(windowSpaces: [UInt64]?, displays: [GridNativeDisplay]?) -> MonitorInfo? {
+    guard let displays, let windowSpaces,
+          let display = displays.first(where: { d in d.spaces.contains { $0.type == 4 && windowSpaces.contains($0.id) } }) else { return nil }
     return sortedMonitorInfos.first { monitor in
         let screen = NSScreen.screens[monitor.monitorAppKitNsScreenScreensId - 1]
         let cg = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0

@@ -39,7 +39,7 @@ Not observing a fullscreen window is not taken as its closure. Three independent
 
 Folding external spaces onto a single built-in display skips a source whose derived block identity is already taken by another space (`map: fold-skipped reason=identity-taken`, logged once per collision) instead of stopping the refresh.
 
-Automatic map changes and gate transitions are written to `diagnostics.log` as `map:` and `gate:` lines with numeric IDs, identifier prefixes and reasons only.
+The controller records automatic map changes, gate transitions, operation outcomes, and two state streams in the local diagnostic history. The map stream represents desired organization and remembered anchors. The backend stream captures status before controller reconciliation, including intermediate status reads during a command. The optional v3 placement fields reuse WindowServer data and native Space evidence from the backend's existing status path. They stay outside the UI and persisted map models and require no separate polling or Accessibility calls.
 
 Automatic discoveries and generated fullscreen/split destinations use a nearby free edge of their source. Distant columns and dormant import slots do not push additions to the far side of the board. Combining boards preserves explicit adapted positions and places generated children relative to their adapted source. Existing coordinates and deliberate gaps are not globally compacted.
 
@@ -63,7 +63,7 @@ For the owned AeroGrid service, closing a focused normal window preserves its wo
 
 Installed app bundles live in `~/Applications`. User configuration, map state, backups, and diagnostics live in `~/Library/Application Support/AeroGrid`. Optional CLI links live in `~/.local/bin`.
 
-The installer preserves existing AeroSpace configuration and rules; a clean installation gets a minimal configuration. Uninstall removes owned additions while retaining backups and user state. Raw state and diagnostics can identify local windows or apps and should be reviewed before sharing.
+The installer preserves existing AeroSpace configuration and rules. A clean installation gets a minimal configuration. Uninstall removes owned additions while retaining backups and user state. The bounded local history uses per-run aliases for identifiers and can be disabled independently of the map and current health. See the [history format and settings](troubleshooting.md#local-window-and-space-history).
 
 ## Updates
 

@@ -1,5 +1,6 @@
 @testable import AppBundle
 import Common
+import CoreGraphics
 import XCTest
 
 @MainActor final class GridLayoutCommandTest: XCTestCase {
@@ -28,6 +29,54 @@ import XCTest
         XCTAssertTrue(gridOwnsBackendUI(bundleIdentifier:"local.AeroGrid.Backend.debug"))
         XCTAssertFalse(gridOwnsBackendUI(bundleIdentifier:"bobko.aerospace"))
         XCTAssertFalse(gridOwnsBackendUI(bundleIdentifier:nil))
+    }
+    func testPlacementStatusExtensionIncludesEmptyWorkspacesOnlyOnRequest() async throws {
+        let empty = Workspace.get(byName: "diagnostic-empty")
+        let ws = Workspace.get(byName: name)
+        let window = TestWindow.new(id: 77, parent: ws.rootTilingContainer)
+        func read(_ args: [String]) async throws -> [String: Any] {
+            let result = await execute(args)
+            XCTAssertTrue(result.stderr.isEmpty)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.joined().utf8)) as? [String: Any])
+        }
+        let ordinary = try await read(["grid-layout", "status"])
+        XCTAssertEqual(ordinary["extensionVersion"] as? Int, 3)
+        XCTAssertNil(ordinary["placementDiagnostics"])
+        let status = try await read(["grid-layout", "--data", "diagnostics", "status"])
+        let report = try XCTUnwrap(status["placementDiagnostics"] as? [String: Any])
+        let workspaces = try XCTUnwrap(report["workspaces"] as? [[String: Any]])
+        XCTAssertTrue(workspaces.contains { $0["name"] as? String == empty.name })
+        let windows = try XCTUnwrap(report["windows"] as? [String: [String: Any]])
+        XCTAssertEqual(windows[String(window.windowId)]?["source"] as? String, "windowTree")
+        XCTAssertTrue(window.nodeWorkspace === ws)
+    }
+
+    func testDiagnosticGeometryAndMembershipRequireMatchingWindowServerOwner() throws {
+        let rect = CGRect(x: -200, y: 100, width: 300, height: 400)
+        let entry: [String: Any] = [
+            kCGWindowNumber as String: NSNumber(value: 77), kCGWindowOwnerPID as String: NSNumber(value: 123),
+            kCGWindowBounds as String: rect.dictionaryRepresentation, kCGWindowIsOnscreen as String: false,
+        ]
+        let row = try XCTUnwrap(GridServerWindow(entry, includeGeometry: true))
+        let placement = gridWindowPlacement(serverWindow: row, pid: 123, spaceIDs: [5, 3], deferred: false)
+        XCTAssertEqual(placement["frame"] as? [String: Double], ["x": -200, "y": 100, "width": 300, "height": 400])
+        XCTAssertEqual(placement["onScreen"] as? Bool, false)
+        XCTAssertEqual(placement["nativeSpaceIDs"] as? [UInt64], [3, 5])
+        let reusedNumber = gridWindowPlacement(serverWindow: row, pid: 124, spaceIDs: [3], deferred: true)
+        XCTAssertEqual(reusedNumber as? [String: String], ["source": "retainedHome", "ownerEvidence": "mismatched"])
+        let unknownMembership = gridWindowPlacement(serverWindow: row, pid: 123, spaceIDs: [], deferred: false)
+        XCTAssertNil(unknownMembership["nativeSpaceIDs"])
+        XCTAssertNil(gridDiagnosticFrame(.zero))
+        XCTAssertNil(gridDiagnosticFrame(.infinite))
+    }
+    func testNativeCatalogDoesNotGuessPhysicalMonitorForSharedSpaces() throws {
+        let shared = GridNativeDisplay(id: "Main", current: 3, spaces: [(3, 0), (6, 4)])
+        let report = try XCTUnwrap(gridDiagnosticNativeCatalog([shared], monitorsByID: ["a": 1], physicalDisplayCount: 2).first)
+        XCTAssertNil(report["monitor"])
+        XCTAssertEqual((report["spaces"] as? [[String: Any]])?.count, 2)
+        XCTAssertEqual(gridDiagnosticNativeCatalog([shared], monitorsByID: ["a": 1], physicalDisplayCount: 1).first?["monitor"] as? Int, 1)
+        let separate = GridNativeDisplay(id: "B", current: 3, spaces: [(3, 0)])
+        XCTAssertEqual(gridDiagnosticNativeCatalog([separate], monitorsByID: ["a": 1, "b": 2], physicalDisplayCount: 2).first?["monitor"] as? Int, 2)
     }
     func testNormalAndNativeTargetsInSharedWorkspaceAreIndependent() async throws {
         let ws = Workspace.get(byName: name)
