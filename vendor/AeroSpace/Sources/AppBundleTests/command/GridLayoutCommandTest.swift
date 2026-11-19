@@ -135,6 +135,20 @@ import XCTest
         XCTAssertTrue(normal.parent === ws.rootTilingContainer)
     }
 
+    func testExactFullscreenTargetKeepsRememberedTilingWhenCacheMadeWindowFloat() async throws {
+        let ws = Workspace.get(byName: "cached-fullscreen-target")
+        let fullscreen = TestWindow.new(id: 1, parent: ws.floatingWindowsContainer)
+        fullscreen.layoutReason = .macos(prevParentKind: .tilingContainer)
+        let check = try await exactFullscreenTarget("check-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
+        XCTAssertTrue(check.stderr.isEmpty, check.stderr.joined())
+        XCTAssertTrue(fullscreen.parent === ws.floatingWindowsContainer)
+
+        let activation = try await exactFullscreenTarget("activate-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
+        XCTAssertTrue(activation.stderr.isEmpty, activation.stderr.joined())
+        XCTAssertTrue(fullscreen.parent === ws.macOsNativeFullscreenWindowsContainer)
+        XCTAssertEqual(fullscreen.layoutReason, .macos(prevParentKind: .tilingContainer))
+    }
+
     func testExactFullscreenTargetRejectsNormalUnknownHiddenAndWrongWorkspace() async throws {
         let ws = Workspace.get(byName: "rejected-fullscreen-target")
         let other = Workspace.get(byName: "other-fullscreen-target")

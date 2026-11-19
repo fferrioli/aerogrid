@@ -385,12 +385,14 @@ struct GridLayoutCommand: Command {
                     if request.window == nil {
                         guard placeWorkspaceOnMonitor(ws, targetMonitor: monitor) else { return .fail(io.err("Workspace assignment conflict")) }
                     } else if let window, let parent = window.parent, !(parent is MacosFullscreenWindowsContainer) {
-                        await gridRememberNativeLayout(ws)
-                        guard window.parent === parent,
-                              fullscreenTarget(window.windowId, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) === window else {
-                            return .fail(io.err("Fullscreen window no longer exists in this space"))
+                        if window.layoutReason == .standard {
+                            await gridRememberNativeLayout(ws)
+                            guard window.parent === parent,
+                                  fullscreenTarget(window.windowId, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) === window else {
+                                return .fail(io.err("Fullscreen window no longer exists in this space"))
+                            }
+                            if window.layoutReason == .standard { window.layoutReason = .macos(prevParentKind: parent.kind) }
                         }
-                        window.layoutReason = .macos(prevParentKind: parent.kind)
                         window.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
                     }
                     try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor)
@@ -452,9 +454,8 @@ struct GridLayoutCommand: Command {
                                              nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind) -> Window? {
         guard let window = Window.get(byId: id), window.nodeWorkspace === workspace else { return nil }
         if window.parent is MacosFullscreenWindowsContainer { return window }
-        // AX may rediscover a background fullscreen window as tiled or floating.
-        guard owned, window.layoutReason == .standard,
-              window.parent is TilingContainer || window.parent is FloatingWindowsContainer,
+        // AX rediscovery and cached layout recovery can both leave fullscreen windows in normal containers.
+        guard owned, window.parent is TilingContainer || window.parent is FloatingWindowsContainer,
               nativeSpaceKind(id) == .fullscreen else { return nil }
         return window
     }

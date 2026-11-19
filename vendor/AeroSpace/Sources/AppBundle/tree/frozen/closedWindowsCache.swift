@@ -62,11 +62,10 @@ struct FrozenWorkspace: Sendable {
         _ = topLeftCornerToMonitor[frozenWorkspace.monitor.topLeftCorner]?
             .singleOrNil()?
             .setActiveWorkspace(workspace)
-        for frozenWindow in frozenWorkspace.floatingWindows {
-            MacWindow.get(byId: frozenWindow.id)?.bindAsFloatingWindow(to: workspace)
-        }
-        for frozenWindow in frozenWorkspace.macosUnconventionalWindows { // Will get fixed by normalizations
-            MacWindow.get(byId: frozenWindow.id)?.bindAsFloatingWindow(to: workspace)
+        for frozenWindow in frozenWorkspace.floatingWindows + frozenWorkspace.macosUnconventionalWindows {
+            if let window = MacWindow.get(byId: frozenWindow.id) {
+                restoreCachedFloatingWindow(window, workspace: workspace)
+            }
         }
         let prevRoot = workspace.rootTilingContainer // Save prevRoot into a variable to avoid it being garbage collected earlier than needed
         let potentialOrphans = prevRoot.allLeafWindowsRecursive
@@ -83,6 +82,12 @@ struct FrozenWorkspace: Sendable {
             .setActiveWorkspace(Workspace.get(byName: monitor.visibleWorkspace))
     }
     return true
+}
+
+@MainActor func restoreCachedFloatingWindow(_ window: Window, workspace: Workspace, owned: Bool = gridOwnsBackendUI()) {
+    // AX may not see fullscreen on another Space, so normalization may be unable to recover it.
+    if owned && window.parent is MacosFullscreenWindowsContainer { return }
+    window.bindAsFloatingWindow(to: workspace)
 }
 
 @discardableResult
