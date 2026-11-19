@@ -122,6 +122,10 @@ def main():
     def blind_fixture(seconds):
         command(CLI, "grid-layout", "--data", json.dumps({"windowID": target, "seconds": seconds, "forget": True}), "debug-blind")
 
+    def current_native_space():
+        displays = status()["placementDiagnostics"]["nativeDisplays"]
+        return next(display["current"] for display in displays if display.get("monitor") == monitor)
+
     try:
         real = wait_for(lambda: windows if len(windows := fixture_windows()) == 3 else None, "three fixture windows")
         if any(w["workspace"] != workspace for w in real):
@@ -153,6 +157,11 @@ def main():
                        and row["payload"]["command"] == "activate-target" for row in rows)
 
         wait_for(action_observed, "correlated frontend navigation and backend command")
+        fullscreen_space = current_native_space()
+        # A focused window can be discovered again in the backend's light session.
+        # Leave the fullscreen Space in the background while testing discovery loss.
+        command(CLI, "grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": monitor}), "activate-target")
+        wait_for(lambda: current_native_space() != fullscreen_space, "return to the normal test desktop")
         blind_fixture(30)
         blind = True
 
@@ -165,6 +174,7 @@ def main():
         wait_for(unattributed_space, "native fullscreen Space with unknown occupancy")
         blind_fixture(0)
         blind = False
+        command(CLI, "grid-layout", "--data", fullscreen_space, "native-focus")
         wait_for(fullscreen_samples, "restored fullscreen attribution")
         assert stat.S_IMODE(HISTORY.stat().st_mode) == 0o600
         assert stat.S_IMODE(HISTORY.parent.stat().st_mode) == 0o700
