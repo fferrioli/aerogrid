@@ -155,10 +155,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..3f451fd
+index 0000000..6ad248a
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,703 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -532,8 +532,10 @@ index 0000000..3f451fd
 +                }
 +                let window: Window?
 +                if let id = request.window {
-+                    guard let selected = ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive.first(where: { $0.windowId == id }) else { return .fail(io.err("Fullscreen window no longer exists in this space")) }
-+                    if !isUnitTest, gridNativeMonitor(selected)?.monitorId_oneBased != request.monitor { return .fail(io.err("Fullscreen belongs to another physical display")) }
++                    guard let selected = fullscreenTarget(id, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) else {
++                        return .fail(io.err("Fullscreen window no longer exists in this space"))
++                    }
++                    if !isUnitTest, gridNativeMonitor(windowID: id)?.monitorId_oneBased != request.monitor { return .fail(io.err("Fullscreen belongs to another physical display")) }
 +                    window = selected
 +                } else {
 +                    window = gridNormalWindow(ws)
@@ -543,6 +545,14 @@ index 0000000..3f451fd
 +                    defer { gridPendingWorkspaces.remove(ws.name) }
 +                    if request.window == nil {
 +                        guard placeWorkspaceOnMonitor(ws, targetMonitor: monitor) else { return .fail(io.err("Workspace assignment conflict")) }
++                    } else if let window, let parent = window.parent, !(parent is MacosFullscreenWindowsContainer) {
++                        await gridRememberNativeLayout(ws)
++                        guard window.parent === parent,
++                              fullscreenTarget(window.windowId, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) === window else {
++                            return .fail(io.err("Fullscreen window no longer exists in this space"))
++                        }
++                        window.layoutReason = .macos(prevParentKind: parent.kind)
++                        window.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
 +                    }
 +                    try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor)
 +                    if let window {
@@ -597,6 +607,17 @@ index 0000000..3f451fd
 +            }
 +            return .succ
 +        } catch { return .fail(io.err("grid-layout: \(error.localizedDescription)")) }
++    }
++
++    @MainActor private func fullscreenTarget(_ id: UInt32, in workspace: Workspace, owned: Bool,
++                                             nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind) -> Window? {
++        guard let window = Window.get(byId: id), window.nodeWorkspace === workspace else { return nil }
++        if window.parent is MacosFullscreenWindowsContainer { return window }
++        // AX may rediscover a background fullscreen window as tiled or floating.
++        guard owned, window.layoutReason == .standard,
++              window.parent is TilingContainer || window.parent is FloatingWindowsContainer,
++              nativeSpaceKind(id) == .fullscreen else { return nil }
++        return window
 +    }
 +
 +    @MainActor private func status(includeDiagnostics: Bool) async throws -> String {
@@ -2190,10 +2211,10 @@ index 0000000..68df680
 +}
 diff --git a/Sources/AppBundleTests/command/GridLayoutCommandTest.swift b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
 new file mode 100644
-index 0000000..196c6b8
+index 0000000..92dc24c
 --- /dev/null
 +++ b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
-@@ -0,0 +1,721 @@
+@@ -0,0 +1,770 @@
 +@testable import AppBundle
 +import Common
 +import CoreGraphics
@@ -2298,6 +2319,55 @@ index 0000000..196c6b8
 +        let result = await execute(["grid-layout", "--data", "{\"monitor\":\(monitor),\"window\":999}", "activate-target"])
 +        XCTAssertFalse(result.stderr.isEmpty)
 +        XCTAssertEqual(focus.windowOrNil?.windowId, 2)
++    }
++    private func exactFullscreenTarget(_ operation: String, workspace: Workspace, window: Window,
++                                       owned: Bool = true, evidence: GridNativeSpaceKind) async throws -> CmdIoImpl {
++        let monitor = try XCTUnwrap(workspace.workspaceMonitor.monitorId_oneBased)
++        let command = try XCTUnwrap(parseCommand(["grid-layout", "--workspace", workspace.name,
++            "--data", "{\"monitor\":\(monitor),\"window\":\(window.windowId)}", operation]).cmdOrNil as? GridLayoutCommand)
++        let io = CmdIoImpl(stdin: .emptyStdin)
++        _ = await command.run(.defaultEnv, io, ownsBackendUI: owned, nativeSpaceKind: { id in
++            XCTAssertEqual(id, window.windowId)
++            return evidence
++        })
++        return io
++    }
++
++    func testExactFullscreenTargetRepairsOnlyOnActivationWhenNativeEvidenceDisagrees() async throws {
++        let ws = Workspace.get(byName: "restored-fullscreen-target")
++        let normal = TestWindow.new(id: 2, parent: ws.rootTilingContainer)
++        let fullscreen = TestWindow.new(id: 1, parent: ws.floatingWindowsContainer)
++        _ = normal.focusWindow()
++        let check = try await exactFullscreenTarget("check-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
++        XCTAssertTrue(check.stderr.isEmpty, check.stderr.joined())
++        XCTAssertTrue(fullscreen.parent === ws.floatingWindowsContainer)
++        XCTAssertEqual(fullscreen.layoutReason, .standard)
++        XCTAssertTrue(focus.windowOrNil === normal)
++
++        let activation = try await exactFullscreenTarget("activate-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
++        XCTAssertTrue(activation.stderr.isEmpty, activation.stderr.joined())
++        XCTAssertTrue(fullscreen.parent === ws.macOsNativeFullscreenWindowsContainer)
++        XCTAssertEqual(fullscreen.layoutReason, .macos(prevParentKind: .floatingWindowsContainer))
++        XCTAssertTrue(focus.windowOrNil === fullscreen)
++        XCTAssertTrue(normal.parent === ws.rootTilingContainer)
++    }
++
++    func testExactFullscreenTargetRejectsNormalUnknownHiddenAndWrongWorkspace() async throws {
++        let ws = Workspace.get(byName: "rejected-fullscreen-target")
++        let other = Workspace.get(byName: "other-fullscreen-target")
++        let tiled = TestWindow.new(id: 1, parent: ws.rootTilingContainer)
++        let hidden = TestWindow.new(id: 2, parent: ws.macOsNativeHiddenAppsWindowsContainer)
++        let cases: [(Workspace, Window, Bool, GridNativeSpaceKind)] = [
++            (ws, tiled, true, .normal), (ws, tiled, true, .unknown), (ws, tiled, false, .fullscreen),
++            (ws, hidden, true, .fullscreen), (other, tiled, true, .fullscreen),
++        ]
++        for (destination, window, owned, evidence) in cases {
++            let result = try await exactFullscreenTarget("activate-target", workspace: destination, window: window, owned: owned, evidence: evidence)
++            XCTAssertEqual(result.stderr.joined(), "Fullscreen window no longer exists in this space")
++        }
++        XCTAssertTrue(tiled.parent === ws.rootTilingContainer)
++        XCTAssertTrue(hidden.parent === ws.macOsNativeHiddenAppsWindowsContainer)
++        XCTAssertTrue(ws.macOsNativeFullscreenWindowsContainer.children.isEmpty)
 +    }
 +    func testVerifiedMoveRejectsOwnerMismatchAndNativeFullscreen() async throws {
 +        let ws = Workspace.get(byName: name)

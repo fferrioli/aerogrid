@@ -103,6 +103,55 @@ import XCTest
         XCTAssertFalse(result.stderr.isEmpty)
         XCTAssertEqual(focus.windowOrNil?.windowId, 2)
     }
+    private func exactFullscreenTarget(_ operation: String, workspace: Workspace, window: Window,
+                                       owned: Bool = true, evidence: GridNativeSpaceKind) async throws -> CmdIoImpl {
+        let monitor = try XCTUnwrap(workspace.workspaceMonitor.monitorId_oneBased)
+        let command = try XCTUnwrap(parseCommand(["grid-layout", "--workspace", workspace.name,
+            "--data", "{\"monitor\":\(monitor),\"window\":\(window.windowId)}", operation]).cmdOrNil as? GridLayoutCommand)
+        let io = CmdIoImpl(stdin: .emptyStdin)
+        _ = await command.run(.defaultEnv, io, ownsBackendUI: owned, nativeSpaceKind: { id in
+            XCTAssertEqual(id, window.windowId)
+            return evidence
+        })
+        return io
+    }
+
+    func testExactFullscreenTargetRepairsOnlyOnActivationWhenNativeEvidenceDisagrees() async throws {
+        let ws = Workspace.get(byName: "restored-fullscreen-target")
+        let normal = TestWindow.new(id: 2, parent: ws.rootTilingContainer)
+        let fullscreen = TestWindow.new(id: 1, parent: ws.floatingWindowsContainer)
+        _ = normal.focusWindow()
+        let check = try await exactFullscreenTarget("check-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
+        XCTAssertTrue(check.stderr.isEmpty, check.stderr.joined())
+        XCTAssertTrue(fullscreen.parent === ws.floatingWindowsContainer)
+        XCTAssertEqual(fullscreen.layoutReason, .standard)
+        XCTAssertTrue(focus.windowOrNil === normal)
+
+        let activation = try await exactFullscreenTarget("activate-target", workspace: ws, window: fullscreen, evidence: .fullscreen)
+        XCTAssertTrue(activation.stderr.isEmpty, activation.stderr.joined())
+        XCTAssertTrue(fullscreen.parent === ws.macOsNativeFullscreenWindowsContainer)
+        XCTAssertEqual(fullscreen.layoutReason, .macos(prevParentKind: .floatingWindowsContainer))
+        XCTAssertTrue(focus.windowOrNil === fullscreen)
+        XCTAssertTrue(normal.parent === ws.rootTilingContainer)
+    }
+
+    func testExactFullscreenTargetRejectsNormalUnknownHiddenAndWrongWorkspace() async throws {
+        let ws = Workspace.get(byName: "rejected-fullscreen-target")
+        let other = Workspace.get(byName: "other-fullscreen-target")
+        let tiled = TestWindow.new(id: 1, parent: ws.rootTilingContainer)
+        let hidden = TestWindow.new(id: 2, parent: ws.macOsNativeHiddenAppsWindowsContainer)
+        let cases: [(Workspace, Window, Bool, GridNativeSpaceKind)] = [
+            (ws, tiled, true, .normal), (ws, tiled, true, .unknown), (ws, tiled, false, .fullscreen),
+            (ws, hidden, true, .fullscreen), (other, tiled, true, .fullscreen),
+        ]
+        for (destination, window, owned, evidence) in cases {
+            let result = try await exactFullscreenTarget("activate-target", workspace: destination, window: window, owned: owned, evidence: evidence)
+            XCTAssertEqual(result.stderr.joined(), "Fullscreen window no longer exists in this space")
+        }
+        XCTAssertTrue(tiled.parent === ws.rootTilingContainer)
+        XCTAssertTrue(hidden.parent === ws.macOsNativeHiddenAppsWindowsContainer)
+        XCTAssertTrue(ws.macOsNativeFullscreenWindowsContainer.children.isEmpty)
+    }
     func testVerifiedMoveRejectsOwnerMismatchAndNativeFullscreen() async throws {
         let ws = Workspace.get(byName: name)
         let window = TestWindow.new(id: 1, parent: ws.rootTilingContainer)
