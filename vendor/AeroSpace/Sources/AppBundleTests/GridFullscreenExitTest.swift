@@ -55,6 +55,23 @@ final class GridFullscreenExitTest: XCTestCase {
         try await checkExit(bundleIdentifier: "bobko.aerospace", nativeSpace: .fullscreen, remains: false)
     }
 
+    func testCachedFloatingRestorePreservesLiveFullscreenOnlyForOwnedBackend() {
+        let workspace = Workspace.get(byName: name)
+        let cached = Workspace.get(byName: "cached-workspace")
+        let fullscreen = TestWindow.new(id: 1, parent: workspace.macOsNativeFullscreenWindowsContainer)
+        fullscreen.layoutReason = .macos(prevParentKind: .tilingContainer)
+        let floating = TestWindow.new(id: 2, parent: workspace.floatingWindowsContainer)
+
+        restoreCachedFloatingWindow(fullscreen, workspace: cached, owned: true)
+        restoreCachedFloatingWindow(floating, workspace: cached, owned: true)
+        XCTAssertTrue(fullscreen.parent === workspace.macOsNativeFullscreenWindowsContainer)
+        XCTAssertEqual(fullscreen.layoutReason, .macos(prevParentKind: .tilingContainer))
+        XCTAssertTrue(floating.parent === cached.floatingWindowsContainer)
+
+        restoreCachedFloatingWindow(fullscreen, workspace: cached, owned: false)
+        XCTAssertTrue(fullscreen.parent === cached.floatingWindowsContainer)
+    }
+
     func testNativeSpaceClassification() {
         let displays = [
             GridNativeDisplay(id: "display-a", current: 1, spaces: [(1, 0), (2, 4)]),

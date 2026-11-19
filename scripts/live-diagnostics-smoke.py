@@ -149,10 +149,10 @@ def main():
                             if cell.get("nativeWindow") == {key: real[0][key] for key in ("id", "pid", "boot")})
         command(APP, "--action", "jump", fixture_cell)
 
-        def action_observed():
+        def action_observed(after=0):
             _, _, rows = observe()
             actions = {row["operation"] for row in rows if row["kind"] == "action" and row["payload"]["name"] == "openSpace"
-                       and row["payload"]["outcome"] == "ok" and "operation" in row}
+                       and row["sequence"] > after and row["payload"]["outcome"] == "ok" and "operation" in row}
             return any(row.get("operation") in actions and row["kind"] == "command"
                        and row["payload"]["command"] == "activate-target" for row in rows)
 
@@ -176,6 +176,12 @@ def main():
         blind = False
         command(CLI, "grid-layout", "--data", fullscreen_space, "native-focus")
         wait_for(fullscreen_samples, "restored fullscreen attribution")
+        command(CLI, "grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": monitor}), "activate-target")
+        wait_for(lambda: current_native_space() != fullscreen_space, "background fixture fullscreen Space")
+        last_action = observe()[2][-1]["sequence"]
+        command(APP, "--action", "jump", fixture_cell)
+        wait_for(lambda: action_observed(last_action) and current_native_space() == fullscreen_space,
+                 "frontend navigation to the recovered background fullscreen Space")
         assert stat.S_IMODE(HISTORY.stat().st_mode) == 0o600
         assert stat.S_IMODE(HISTORY.parent.stat().st_mode) == 0o700
         print("PASS: active installation recorded normal geometry, fullscreen attribution, navigation and transient unknown occupancy")

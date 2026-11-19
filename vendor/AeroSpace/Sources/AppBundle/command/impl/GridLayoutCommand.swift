@@ -371,8 +371,10 @@ struct GridLayoutCommand: Command {
                 }
                 let window: Window?
                 if let id = request.window {
-                    guard let selected = ws.macOsNativeFullscreenWindowsContainer.allLeafWindowsRecursive.first(where: { $0.windowId == id }) else { return .fail(io.err("Fullscreen window no longer exists in this space")) }
-                    if !isUnitTest, gridNativeMonitor(selected)?.monitorId_oneBased != request.monitor { return .fail(io.err("Fullscreen belongs to another physical display")) }
+                    guard let selected = fullscreenTarget(id, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) else {
+                        return .fail(io.err("Fullscreen window no longer exists in this space"))
+                    }
+                    if !isUnitTest, gridNativeMonitor(windowID: id)?.monitorId_oneBased != request.monitor { return .fail(io.err("Fullscreen belongs to another physical display")) }
                     window = selected
                 } else {
                     window = gridNormalWindow(ws)
@@ -382,6 +384,16 @@ struct GridLayoutCommand: Command {
                     defer { gridPendingWorkspaces.remove(ws.name) }
                     if request.window == nil {
                         guard placeWorkspaceOnMonitor(ws, targetMonitor: monitor) else { return .fail(io.err("Workspace assignment conflict")) }
+                    } else if let window, let parent = window.parent, !(parent is MacosFullscreenWindowsContainer) {
+                        if window.layoutReason == .standard {
+                            await gridRememberNativeLayout(ws)
+                            guard window.parent === parent,
+                                  fullscreenTarget(window.windowId, in: ws, owned: ownsBackendUI, nativeSpaceKind: nativeSpaceKind) === window else {
+                                return .fail(io.err("Fullscreen window no longer exists in this space"))
+                            }
+                            if window.layoutReason == .standard { window.layoutReason = .macos(prevParentKind: parent.kind) }
+                        }
+                        window.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
                     }
                     try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor)
                     if let window {
@@ -436,6 +448,16 @@ struct GridLayoutCommand: Command {
             }
             return .succ
         } catch { return .fail(io.err("grid-layout: \(error.localizedDescription)")) }
+    }
+
+    @MainActor private func fullscreenTarget(_ id: UInt32, in workspace: Workspace, owned: Bool,
+                                             nativeSpaceKind: @MainActor (UInt32) -> GridNativeSpaceKind) -> Window? {
+        guard let window = Window.get(byId: id), window.nodeWorkspace === workspace else { return nil }
+        if window.parent is MacosFullscreenWindowsContainer { return window }
+        // AX rediscovery and cached layout recovery can both leave fullscreen windows in normal containers.
+        guard owned, window.parent is TilingContainer || window.parent is FloatingWindowsContainer,
+              nativeSpaceKind(id) == .fullscreen else { return nil }
+        return window
     }
 
     @MainActor private func status(includeDiagnostics: Bool) async throws -> String {
