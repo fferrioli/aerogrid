@@ -58,6 +58,8 @@ enum FixtureSession {
         guard request.pid > 1, request.workspace == "grid-fixture-\(run.lastPathComponent)" else {
             throw GridError.invalid("Invalid fixture owner or workspace")
         }
+        try JSONEncoder().encode(request.workspaces.sorted())
+            .write(to: run.appendingPathComponent("fixture-workspaces.json"), options: .atomic)
         return (run, request)
     }
 
@@ -68,8 +70,10 @@ enum FixtureSession {
         let model = try AppModel(fixture: (run, request))
         let jump = run.appendingPathComponent("jump.json")
         let stop = run.appendingPathComponent("stop-observer")
+        let clock = Timer(timeInterval: 0.05, repeats: true) { _ in }
+        RunLoop.current.add(clock, forMode: .default)
         var refreshAt = Date.distantPast
-        defer { model.stop() }
+        defer { clock.invalidate(); model.stop() }
         while !FileManager.default.fileExists(atPath: stop.path) {
             if !model.hasPendingWork {
                 if let data = try? Data(contentsOf: jump) {

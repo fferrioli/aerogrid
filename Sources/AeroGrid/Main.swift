@@ -287,8 +287,9 @@ struct AeroGridMain {
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
             return
         }
-        if args == ["--fixture-handoff"] {
+        if args.first == "--fixture-handoff" {
             do {
+                guard args.count == 1 else { throw GridError.invalid("Invalid fixture handoff request") }
                 let run = try FixtureSession.activeRun()
                 guard let controller = otherInstances.first else { throw GridError.unavailable("Start the installed controller first") }
                 DistributedNotificationCenter.default().postNotificationName(FixtureSession.handoff, object: run.lastPathComponent,

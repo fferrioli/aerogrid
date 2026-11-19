@@ -102,6 +102,18 @@ class FixtureIsolationTests(unittest.TestCase):
         self.restore.assert_called_once()
         self.launch.assert_called_once()
 
+    def test_occupied_fixture_workspace_keeps_production_blocked_after_restore(self):
+        with patch.object(live, "activate"):
+            with self.assertRaisesRegex(RuntimeError, "A window remains in a fixture workspace"):
+                with live.fixture_session(self.choose_display) as session:
+                    live.write_json(session.directory / "fixture-workspaces.json", ["grid-space-fixture-block"])
+                    self.observation["windowHomes"].append(dict(id=13, pid=44, boot="boot", workspace="grid-space-fixture-block"))
+        self.restore.assert_called_once()
+        self.launch.assert_not_called()
+        self.observation["windowHomes"].pop()
+        live.recover()
+        self.launch.assert_called_once()
+
     def test_failed_restore_keeps_the_controller_blocked_until_explicit_recovery(self):
         self.restore.side_effect = RuntimeError("Native restore failed")
         with patch.object(live, "activate"):
@@ -115,6 +127,34 @@ class FixtureIsolationTests(unittest.TestCase):
         live.recover()
         self.assertEqual(self.restore.call_count, 2)
         self.launch.assert_called_once()
+
+
+class DesktopRestoreTests(unittest.TestCase):
+    def test_remaps_physical_displays_and_restores_native_and_real_focus(self):
+        focused = dict(id=12, pid=42, boot="boot", workspace="original")
+        original = dict(displays={"1": "builtin"}, visible={"1": "original"}, native={"1": 7},
+                        focusedMonitor=1, focused=focused, focusWasFrontmost=True)
+        observed = {
+            "displays": [dict(id="builtin", monitor=2)], "visible": {"2": "fixture"},
+            "focusedMonitor": 2, "focusedWindow": 12, "windowHomes": [focused],
+            "placementDiagnostics": {"nativeDisplays": [dict(monitor=2, current=9)],
+                                     "frontmostMatchesFocusedWindowOwner": False},
+        }
+        calls = []
+
+        def command(*args):
+            calls.append(args)
+            if args[-1] == "activate-target":
+                observed["visible"] = {"2": "original"}
+                self.assertEqual(json.loads(args[-2]), {"monitor": 2})
+            elif args[-1] == "native-focus":
+                observed["placementDiagnostics"]["nativeDisplays"][0]["current"] = 7
+            elif args[0] == "focus":
+                observed["placementDiagnostics"]["frontmostMatchesFocusedWindowOwner"] = True
+
+        with patch.object(live, "status", return_value=observed), patch.object(live, "command", side_effect=command):
+            live.restore(original)
+        self.assertEqual([call[-1] for call in calls], ["activate-target", "native-focus", 12])
 
 
 if __name__ == "__main__":

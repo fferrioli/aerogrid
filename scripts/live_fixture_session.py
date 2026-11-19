@@ -54,7 +54,7 @@ def try_lock(fd):
 
 
 def activate(workspace, monitor):
-    command("grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": monitor}), "activate-target")
+    command("grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": int(monitor)}), "activate-target")
 
 
 def native_by_monitor(observation):
@@ -78,7 +78,8 @@ def capture(observation):
         raise RuntimeError("The current focused window cannot be recovered")
     return {"displays": displays, "visible": observation["visible"],
             "native": {key: value["current"] for key, value in native.items()},
-            "focusedMonitor": observation["focusedMonitor"], "focused": focused}
+            "focusedMonitor": observation["focusedMonitor"], "focused": focused,
+            "focusWasFrontmost": observation["placementDiagnostics"].get("frontmostMatchesFocusedWindowOwner", False)}
 
 
 def restore(original):
@@ -104,9 +105,14 @@ def restore(original):
         return focused and any(all(home[key] == focused[key] for key in ("id", "pid", "boot"))
                                for home in observation["windowHomes"])
 
+    def focus_matches(observation):
+        return (observation.get("focusedWindow") == focused["id"]
+                and (not original.get("focusWasFrontmost")
+                     or observation["placementDiagnostics"].get("frontmostMatchesFocusedWindowOwner")))
+
     current = status()
     if matching_focus(current):
-        if current.get("focusedWindow") != focused["id"]:
+        if not focus_matches(current):
             command("focus", "--window-id", focused["id"])
     elif str(current["focusedMonitor"]) != focused_monitor:
         command("focus-monitor", focused_monitor)
@@ -115,7 +121,7 @@ def restore(original):
         observed = status()
         return (observed["visible"] == visible and str(observed["focusedMonitor"]) == focused_monitor
                 and all(native_by_monitor(observed).get(key, {}).get("current") == space for key, space in native.items())
-                and (not matching_focus(observed) or observed.get("focusedWindow") == focused["id"]))
+                and (not matching_focus(observed) or focus_matches(observed)))
 
     wait_for(restored, "original workspaces, native Spaces and surviving focus", seconds=8)
 
@@ -230,6 +236,11 @@ class Session:
                 wait_for(lambda: all(w["pid"] != pid for w in status()["windowHomes"]),
                          "fixture windows to disappear from the backend")
             restore(json.loads(journal.read_text()))
+            manifest = self.directory / "fixture-workspaces.json"
+            derived = set(json.loads(manifest.read_text())) if manifest.exists() else set()
+            if any(home["workspace"].startswith(self.workspace) or home["workspace"] in derived
+                   for home in status()["windowHomes"]):
+                raise RuntimeError("A window remains in a fixture workspace. Close it before running recovery")
         (ROOT / "active").unlink()
         fcntl.flock(interlock, fcntl.LOCK_UN)
         subprocess.run(["/usr/bin/open", "-g", str(APP)], check=True, timeout=8)
