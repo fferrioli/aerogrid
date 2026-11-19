@@ -16,12 +16,20 @@ final class DiagnosticPlacementTests: XCTestCase {
         desktop.windows = [actual]
         desktop.windowHomes = [WindowHome(id: 123457, pid: actual.pid, boot: actual.boot, workspace: pending)]
         let frame = DiagnosticFrame(x: -200, y: 10, width: 350, height: 400)
-        var placement = BackendPlacementDiagnostics(
-            windows: [actual.id: .init(source: "windowTree", frame: frame, onScreen: false, nativeSpaceIDs: [900])],
-            workspaces: [.init(name: occupied, monitor: 2), .init(name: empty, monitor: 1), .init(name: pending, monitor: 1)],
-            displayFrames: [1: .init(x: -1600, y: 0, width: 1600, height: 940)],
-            nativeDisplays: [.init(monitor: 1, current: 900, spaces: [.init(id: 900, type: 4), .init(id: 901, type: 4), .init(id: 902, type: 0)])],
-            locked: false, pendingWindowIDs: [123457], focusHoldWorkspace: empty, frontmostMatchesFocusedWindowOwner: false)
+        let backendJSON = """
+            {
+              "windows": {
+                "123456": {"source":"windowTree","ownerEvidence":"matched","onScreen":false,
+                           "frame":{"x":-200,"y":10,"width":350,"height":400},"nativeSpaceIDs":[900]}
+              },
+              "workspaces": [{"name":"\(occupied)","monitor":2},{"name":"\(empty)","monitor":1},{"name":"\(pending)","monitor":1}],
+              "displayFrames": {"1":{"x":-1600,"y":0,"width":1600,"height":940}},
+              "nativeDisplays": [{"monitor":1,"current":900,"spaces":[{"id":900,"type":4},{"id":901,"type":4},{"id":902,"type":0}]}],
+              "locked": false, "pendingWindowIDs": [123457], "focusHoldWorkspace": "\(empty)",
+              "frontmostMatchesFocusedWindowOwner": false
+            }
+            """
+        var placement = try JSONDecoder().decode(BackendPlacementDiagnostics.self, from: Data(backendJSON.utf8))
         let aliases = DiagnosticAliases()
         let backend = DiagnosticSnapshot(desktop: desktop, placement: placement, aliases: aliases)
         let key = aliases.window(actual.identity)

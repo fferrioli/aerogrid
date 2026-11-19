@@ -22,7 +22,7 @@ struct BackendPlacementDiagnostics: Decodable {
         var current: UInt64
         var spaces: [Space]
     }
-    var windows: [UInt32: Window]
+    var windows: [String: Window]
     var workspaces: [Workspace]
     var displayFrames: [Int: DiagnosticFrame]
     var nativeDisplays: [NativeDisplay]?
@@ -192,7 +192,7 @@ extension DiagnosticSnapshot {
         var byNativeSpace: [UInt64: [String]] = [:]
         for window in windows {
             let key = aliases.window(window.identity)
-            let evidence = placement?.windows[window.id]
+            let evidence = placement?.windows[String(window.id)]
             byWorkspace[window.workspace, default: []].append(key)
             if !window.nativeFullscreen { normalWorkspaces.insert(window.workspace) }
             for space in evidence?.nativeSpaceIDs ?? [] { byNativeSpace[space, default: []].append(key) }
