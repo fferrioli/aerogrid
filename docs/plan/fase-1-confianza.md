@@ -150,3 +150,167 @@ Diseño en `docs/plan/decisiones/F1-0.md`. Contrato común: nombre de la identid
 ### F1-0c · Docs y verificación en vivo `[ORQ]` + `[HUM]`
 
 `README.md`, `BUILD-ON-ANOTHER-MAC.md`, `docs/updates.es.md`: el paso opcional, qué cambia (Accesibilidad persiste), qué no (Gatekeeper, política de seguridad), cómo quitarlo. En vivo: `setup-signing.py`, instalar (reinicia una vez y se aprueba), instalar otro build distinto ⇒ `--health` con `accessibilityGranted: true` sin aprobar de nuevo.
+
+---
+
+## F1-1 · Fichas
+
+Diseño en `docs/plan/decisiones/F1-1.md`. Orden: F1-1b y F1-1c en paralelo; después F1-1a (usa los tipos de F1-1b); después F1-1d (aplicación, ventana de inicio de sesión y acción manual).
+
+### F1-1b · Plantillas y emparejador puro `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/PlaceTemplate.swift` (nuevo), `Tests/GridCoreTests/PlaceMatcherTests.swift` (nuevo). No toca `DynamicEngine` ni `SpaceMap`.
+
+**Especificación.**
+1. Tipos públicos, `Codable`/`Equatable`:
+   ```swift
+   public struct TemplateSlot: Codable, Hashable { public var bundleID: String; public var ordinal: Int }
+   public struct TemplateNode: Codable, Equatable { public var weight: Double; public var orientation: String?; public var layout: String?; public var slot: TemplateSlot?; public var children: [TemplateNode]? }
+   public struct TemplateFloating: Codable, Equatable { public var slot: TemplateSlot; public var x, y, width, height: Double }
+   public struct PlaceTemplate: Codable, Equatable { public var version = 1; public var tree: TemplateNode; public var floating: [TemplateFloating]; public var fullscreen: TemplateSlot?; public var capturedAt: Date }
+   ```
+2. `PlaceTemplate.capture(snapshot: LayoutSnapshot, windows: [WindowInfo], now: Date) -> PlaceTemplate?`: recorre `snapshot.tree` en profundidad y después `floating`; cada hoja con ventana conocida en `windows` (por id y pid) y `bundleID` no vacío se vuelve `TemplateSlot(bundleID, ordinal)`, con ordinal = cantidad de hojas previas de ese bundle en el recorrido. Hojas sin ventana conocida o sin bundle se omiten (los contenedores que queden vacíos se podan). Sin hojas ⇒ `nil`. Conserva pesos, orientación y layout.
+3. `PlaceTemplate.fullscreen(slot:capturedAt:)`: plantilla de tarjeta fullscreen (árbol raíz vacío, `fullscreen = slot`).
+4. `var slots: [TemplateSlot]` en orden de recorrido (árbol, flotantes, fullscreen).
+5. `func instantiate(_ assignment: [TemplateSlot: WindowIdentity], boot: String) -> LayoutSnapshot?`: produce el `LayoutSnapshot` con IDs actuales; ranuras sin ventana se omiten y los contenedores vacíos se podan; `nil` si no queda ninguna.
+6. Emparejador:
+   ```swift
+   public struct CandidateWindow: Equatable { public var identity: WindowIdentity; public var bundleID: String; public var workspace: String }
+   public struct PlaceTarget: Equatable { public var spaceID: String; public var workspace: String; public var template: PlaceTemplate }
+   public struct PlaceAssignment: Equatable { public var window: WindowIdentity; public var spaceID: String; public var slot: TemplateSlot; public var fullscreen: Bool }
+   public enum PlaceMatcher { public static func assign(candidates: [CandidateWindow], targets: [PlaceTarget], present: [CandidateWindow]) -> [PlaceAssignment] }
+   ```
+   Reglas: (a) para cada objetivo, las ventanas de `present` que **no** son candidatas y están en su workspace cubren las ranuras de su bundle en orden de ordinal; (b) una candidata que ya está en el workspace de un objetivo con ranura libre de su bundle la cubre allí (asignación sin cambio de workspace); (c) las ranuras libres restantes, ordenadas por (orden de `targets`, ordinal), se asignan por bundle a las candidatas libres ordenadas por `identity.id` ascendente; (d) una ranura `fullscreen` produce `fullscreen: true`; (e) cada ventana y cada ranura a lo sumo una vez; sobrantes sin asignar. Determinista.
+
+**Reproducción primero.** No aplica (código nuevo): tests primero, verlos fallar por no compilar o por `fatalError` de un esqueleto.
+
+**Tests (de tabla).** Captura: árbol con dos ventanas de la misma app y una de otra ⇒ ordinales 0,1 y 0; flotantes después del árbol; hoja sin bundle omitida y contenedor podado; `nil` sin hojas. `instantiate` ida y vuelta conserva pesos/orientación con IDs nuevos y poda ranuras faltantes. Emparejador: una app en dos espacios; dos ventanas de la misma app para un espacio con dos ranuras; más ventanas que ranuras; más ranuras que ventanas; ventana presente no candidata cubre su ranura; candidata ya en su espacio no se mueve; ranura fullscreen; orden de objetivos decide el empate; resultado idéntico al repetir.
+
+**Verificación.** `swift test --filter PlaceMatcherTests`, luego `swift test`.
+
+### F1-1c · Backend: marcar ventanas alcanzadas por reglas del usuario `[SUB-impl]` · tamaño S
+
+**Archivos.** `vendor/AeroSpace/Sources/AppBundle/command/impl/GridLayoutCommand.swift` (`status()`), el test de `status` en `vendor/AeroSpace/Sources/AppBundleTests/command/GridLayoutCommandTest.swift`, y si hace falta un archivo `Grid*.swift` nuevo. Parche regenerado y `UPSTREAM.md`.
+
+**Especificación.**
+1. Con backend propio, cada ventana de `status` lleva `"ruled": true` si alguna regla `on-window-detected` de la configuración cargada la alcanza **y** su lista `run` contiene un `move-node-to-workspace`. En otro caso la clave se omite (o `false`; elegir uno y documentarlo).
+2. Reusar el emparejamiento que AeroSpace usa al detectar ventanas si es síncrono; si alguna condición necesita lecturas asíncronas de AX, evaluar solo las condiciones síncronas (app-id, app-name) y tratar las demás como coincidentes (conservador: ante duda, la ventana queda en manos de la regla). Documentar la elección en `UPSTREAM.md`.
+3. Ventanas diferidas: sin la clave. AeroSpace independiente: sin cambios.
+
+**Reproducción primero.** Escribir los tests y verlos fallar (falta la clave).
+
+**Tests.** Regla con `if.app-id` y `move-node-to-workspace` ⇒ `ruled` en esa ventana y no en otra; regla sin `move-node-to-workspace` ⇒ sin `ruled`; regla con condición de título ⇒ según la elección del punto 2.
+
+**Verificación.** `swift test --filter GridLayoutCommandTest`, suite completa del backend, parche regenerado.
+
+### F1-1a · Captura de plantillas en el mapa `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/SpaceMap.swift` (campo), `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/PlaceTemplateCaptureTests.swift` (nuevo). Usa los tipos de `Sources/GridCore/PlaceTemplate.swift` (F1-1b, no se modifica salvo que falte algo: detenerse e informar).
+
+**Especificación.**
+1. `SpaceMap.placeTemplates: [String: PlaceTemplate]? = nil`. Un `state.json` sin el campo se decodifica igual.
+2. **Captura en `captureVisibleLayouts`.** Cada vez que guarda una distribución para un espacio, deriva `PlaceTemplate.capture(snapshot:windows:now:)` con el inventario actual y aplica la regla de reemplazo:
+   - plantilla nueva `nil` ⇒ conservar la anterior;
+   - si hay anterior y el multiconjunto de bundles de la nueva es **subconjunto estricto** del de la anterior ⇒ conservar la anterior (contracción por cierre, típica del apagado);
+   - en otro caso ⇒ reemplazar.
+3. **Organización del usuario.** Después de cada `organize(...)` exitoso, reconstruir sin la regla de contracción las plantillas de los espacios cuyo contenido o distribución cambió en esa acción (comparar antes/después). Undo/redo de organización también reconstruye.
+4. **Tarjeta fullscreen de hogar propio** (`nativeWindow != nil` y vínculo con `spaceID == homeID`): plantilla `PlaceTemplate.fullscreen(slot:)` con el bundle de su ventana y ordinal = posición de esa ventana entre las ventanas fullscreen de ese bundle con hogar propio, por ID ascendente. Las tarjetas fullscreen exclusivas no tienen plantilla (límite conocido: se borran al cerrar su ventana).
+5. **Poda.** Al principio de `refresh()`, borrar plantillas de espacios que ya no existen.
+6. No se captura nada si el inventario no tiene ventanas; no se agregan eventos; nada de títulos.
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`PlaceTemplateCaptureTests`).**
+1. Un espacio con dos ventanas de una app y una de otra: tras `refresh()`, la plantilla tiene esas ranuras y sobrevive a reconstruir el motor con un `boot` distinto.
+2. Contracción por cierre: se cierra una ventana ⇒ la plantilla no cambia; una ventana nueva de otra app ⇒ se reemplaza.
+3. Reordenar por organización del usuario con menos ventanas ⇒ se reemplaza (sin regla de contracción).
+4. Tarjeta fullscreen de hogar propio ⇒ plantilla `fullscreen`; exclusiva ⇒ sin plantilla.
+5. Borrar un espacio ⇒ su plantilla desaparece en el siguiente refresco.
+6. Estado sin `placeTemplates` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
+
+**Verificación.** `swift test --filter PlaceTemplateCaptureTests`, luego `swift test`.
+
+### F1-1d · Aplicar lugares al iniciar sesión y con «Restaurar lugares» `[SUB-impl]` · tamaño L
+
+**Archivos.** `Sources/GridCore/SpaceMap.swift` (`WindowInfo.ruled`, estado persistido), `Sources/GridCore/Engine.swift` (protocolo), `Sources/GridCore/DynamicEngine.swift`, `Sources/AeroGrid/Backend.swift`, `Sources/AeroGrid/LoginSession.swift` (nuevo), `Sources/AeroGrid/AppModel.swift` (solo cablear: deadline, acción externa y método público; las vistas las hace el orquestador), `Tests/GridCoreTests/PlaceRestoreTests.swift` (nuevo).
+
+**Especificación.**
+1. `WindowInfo.ruled: Bool?`, último parámetro del `init` con default `nil`; se decodifica de `status`.
+2. `Backend.enterFullscreen(window: WindowIdentity) throws`, default en la extensión que no hace nada; `AeroSpaceBackend` ejecuta `macos-native-fullscreen on --window-id <id>`.
+3. Estado persistido en `SpaceMap.placeRestore: PlaceRestoreState?` = `{ boot: String; restored: [WindowIdentity]; userPlaced: [WindowIdentity] }`. Si el `boot` del inventario difiere, se reemplaza por uno vacío para el arranque nuevo.
+4. **Seguimiento.** El motor recuerda el workspace de cada ventana entre refrescos (en memoria). Si una ventana cambia de workspace sin que lo haya movido la restauración ni un `organize` del motor, su identidad pasa a `userPlaced`. Movimientos de `organize` también la agregan (son del usuario).
+5. **Automático.** `DynamicEngine.placeRestoreDeadline: Date?` (lo fija `AppModel`) y reloj inyectable (`now: () -> Date`, default `Date.init`, parámetro del `init` con default). En `refresh()`, después de reconciliar fullscreen y antes de capturar distribuciones, si `now() < deadline`: candidatas = ventanas no `ruled`, no `nativeFullscreen`, sin vínculo fullscreen, no `restored`, no `userPlaced`. Objetivos = espacios con plantilla, en orden de `map.spaces` (los dormidos incluidos; una tarjeta fullscreen de hogar propio usa su workspace). `present` = todo el inventario. `PlaceMatcher.assign`.
+6. **Aplicar cada asignación:** si la ventana está en otro workspace, `moveVerified`; agregar la identidad a `restored` (también si falla, para no reintentar); emitir `place-restored window=<id> pid=<pid> space=<prefijo 8> ordinal=<n>` o `place-restore-failed …` con el mismo detalle (sin bundle ID ni nombres). Si `fullscreen`, después del movimiento `enterFullscreen` una vez. Al terminar el lote, para cada espacio no fullscreen que recibió asignaciones: armar el mapeo ranura → ventana con las ventanas de ese workspace (por bundle, en orden de ID) y `backend.restore(workspace:snapshot:)` con `template.instantiate(…)`; si falla, registrar y seguir. Después `sync(try readDesktop())`.
+7. **Manual:** `public func restorePlaces() throws -> Int` dentro de `organize("Restaurar lugares")` (un solo paso de Deshacer), sin plazo, con candidatas = ventanas no `ruled`, sin vínculo fullscreen y no `userPlaced`; devuelve la cantidad de ventanas movidas. Las identidades movidas van a `restored`.
+8. `LoginSession.consoleLoginDate() -> Date?`: lee `utmpx` (`USER_PROCESS`, `ut_line == "console"`, usuario actual) y devuelve la más reciente. `AppModel` fija `placeRestoreDeadline = login + 300 s` si `now < login + 300 s`; si no, `nil`. Acción externa `restore-places` y método `restorePlaces()` que deja un mensaje con la cantidad.
+9. Nada de esto corre con la compuerta cerrada (el motor no refresca entonces).
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`PlaceRestoreTests`, con reloj y backend falsos).**
+1. Arranque nuevo con plantillas guardadas: aparecen ventanas de esas apps en un workspace cualquiera dentro del plazo ⇒ quedan en sus espacios con su distribución (`restore` con IDs nuevos) y eventos `place-restored`.
+2. Fuera del plazo ⇒ nada se mueve; `restorePlaces()` las mueve y un `undo()` las devuelve.
+3. Una ventana restaurada que el usuario mueve después no vuelve en el siguiente refresco (ni por automático ni por manual).
+4. Ventana `ruled` ⇒ nunca se mueve.
+5. Falla de `moveVerified` ⇒ `place-restore-failed`, sin reintento.
+6. Ranura fullscreen ⇒ `enterFullscreen` una sola vez.
+7. Estado sin `placeRestore` ni `ruled` se decodifica; los tests existentes siguen verdes sin cambiar aserciones.
+
+**Verificación.** `swift test --filter PlaceRestoreTests`, luego `swift test`; `zsh scripts/build.sh` compila la app.
+
+---
+
+## F1-2 · Fichas
+
+Diseño en `docs/plan/decisiones/F1-2.md`. F1-2a (lógica) es de subagente; las vistas (selector en el organizador y en el menú, lista de apps faltantes) son del orquestador.
+
+### F1-2a · Setups: guardar y aplicar `[SUB-impl]` · tamaño M
+
+**Archivos.** `Sources/GridCore/Setups.swift` (nuevo), `Sources/GridCore/DynamicEngine.swift`, `Sources/GridCore/SpaceMap.swift` (solo `MapCheckpoint.placeTemplates` opcional: Deshacer y la recuperación de `PendingOrganization` deben restituir también las plantillas; un checkpoint sin el campo se decodifica igual), `Sources/AeroGrid/AppModel.swift` (solo cablear), `Tests/GridCoreTests/SetupTests.swift` (nuevo).
+
+**Especificación.**
+1. Tipos `Codable`/`Equatable`: `Setup { id: String; name: String; createdAt: Date; spaces: [SetupSpace] }`, `SetupSpace { spaceID; name; rect: SpaceRect; foldedRect: SpaceRect?; boardID: String?; preferredRole: String; workspace: String; template: PlaceTemplate? }`. Persistencia en `setups.json` del directorio de soporte con el `Store` existente (escritura atómica); archivo ausente = lista vacía. Nunca dentro de `state.json`.
+2. `DynamicEngine.makeSetup(name:) throws -> Setup`: refresca, captura distribuciones y arma un `SetupSpace` por cada espacio no dormido que tenga plantilla o contenido, con su plantilla actual.
+3. `DynamicEngine.applySetup(_:) throws -> SetupApplyResult` dentro de `organize("Aplicar setup")` (un solo paso de Deshacer):
+   - por cada `SetupSpace`: si existe un espacio con ese `spaceID`, ajustar `rect`/`foldedRect` (si no entra, `nearestVacancy`); si no existe, crearlo (`userCreated = true`) con ese ID, nombre, workspace, rol y rectángulo;
+   - `placeTemplates` de esos espacios = plantillas del setup;
+   - emparejar con `PlaceMatcher` usando como objetivos solo los espacios del setup y como candidatas las ventanas no `ruled` y sin vínculo fullscreen (sin restricción de sesión ni de `userPlaced`: es una acción explícita); mover y restaurar distribuciones con el mismo código que F1-1d (factorizarlo, sin duplicar). Las ranuras `fullscreen` se ignoran (ver F1-1e punto 3): aplicar un setup nunca activa fullscreen;
+   - espacios y ventanas que no están en el setup: sin cambios;
+   - `SetupApplyResult { moved: Int; missingBundleIDs: [String] }` con los bundles de ranuras que quedaron sin ventana, sin repetir, en orden de aparición.
+4. `AppModel`: `setups` publicado (carga al iniciar), `saveSetup(name:)`, `applySetup(id:)` (guarda `missingBundleIDs` en una propiedad publicada para la vista), `renameSetup(id:name:)`, `deleteSetup(id:)`, `openApp(bundleID:)` con `NSWorkspace` (sin mostrar títulos), acción externa `apply-setup <id>`.
+5. Eventos: `setup-applied space=<prefijo> moved=<n> missing=<n>` sin nombres ni bundle IDs.
+
+**Reproducción primero.** Tests 1 y 2 primero, en rojo.
+
+**Tests (`SetupTests`).**
+1. Guardar un mapa con dos espacios y aplicarlo tras reiniciar (boot nuevo, ventanas nuevas en otro workspace): espacios en su lugar, ventanas en sus espacios, distribución restaurada.
+2. `undo()` después de aplicar devuelve espacios, plantillas y ventanas al estado previo.
+3. App ausente ⇒ aparece en `missingBundleIDs` una sola vez.
+4. Ventana fuera del setup y espacio fuera del setup ⇒ sin cambios.
+5. Ventana `ruled` ⇒ no se mueve.
+6. `setups.json` ida y vuelta; archivo ausente ⇒ lista vacía; renombrar y borrar.
+
+**Verificación.** `swift test --filter SetupTests`, luego `swift test`; `zsh scripts/build.sh`.
+
+---
+
+## F1-1 · Revisión independiente: hallazgos y destino
+
+| # | Hallazgo | Destino |
+|---|---|---|
+| 1 | La regla de contracción conserva ranuras de ventanas que siguen abiertas en otro espacio (pliegue, movimiento externo): tras reiniciar, todo vuelve al padre y el hijo queda vacío (`testReviewFoldedPlacesSurviveNewBoot`, `testReviewExternalMoveRemovesSourceSlot`) | F1-1e |
+| 2 | Tras reiniciar el backend, una ventana redescubierta en otro workspace se marca `userPlaced` antes de que la recuperación de hogares la devuelva, y la marca persiste (`testReviewBackendRecoveryIsNotUserPlacement`) | F1-1e |
+| 3 | «Restaurar lugares» con ranura fullscreen registra el paso de Deshacer antes de reconciliar la tarjeta fullscreen; Deshacer lo rechaza (`testReviewManualFullscreenRestorationCanUndo`) | F1-1e |
+
+### F1-1e · Correcciones de la revisión `[SUB-impl]` · tamaño S
+
+**Archivos.** `Sources/GridCore/DynamicEngine.swift`, `Tests/GridCoreTests/PlaceRestoreTests.swift`.
+
+**Especificación.**
+1. **Contracción solo por cierre.** La plantilla anterior se conserva solo si **ninguna** ventana que estaba en el workspace del espacio en la observación anterior está ahora en otro workspace del inventario. Si alguna se mudó (pliegue, movimiento externo, organización), se reemplaza.
+2. **Inferencia de movimientos.** Se infiere `userPlaced` comparando con la línea base del final del refresco anterior, **después** de la recuperación por reinicio del backend o apagón; en el refresco en que cambia `backendSession` o hubo recuperación, no se infiere nada. La línea base se rehace al final de cada refresco. Los movimientos del propio motor (recuperación, pliegue, retorno o salida de fullscreen, restauración, setups) nunca cuentan como del usuario.
+3. **Las operaciones manuales no tocan fullscreen** (decisión del orquestador: Deshacer no puede salir de fullscreen nativo). `restorePlaces()` y `applySetup` ignoran las ranuras `fullscreen` (ni mueven ni activan fullscreen esas ventanas); solo la restauración automática al iniciar sesión activa fullscreen, y esa no tiene Deshacer. Cambio deliberado: `testReviewManualFullscreenRestorationCanUndo` pasa a `testManualRestoreIgnoresFullscreenSlots` y afirma `restorePlaces() == 0`, ventana sin mover y sin fullscreen; el resto de sus aserciones (Deshacer no falla) se conserva.
+
+**Reproducción primero.** Copiar los cuatro tests `testReview…` que fallan y el que pasa desde el diff que indica el brief, sin cambiar aserciones; correrlos y pegar el rojo.
+
+**Verificación.** `swift test --filter 'Place(Restore|TemplateCapture|Matcher)Tests'`, luego `swift test`.

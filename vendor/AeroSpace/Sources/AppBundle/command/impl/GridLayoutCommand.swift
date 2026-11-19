@@ -277,7 +277,7 @@ struct GridLayoutCommand: Command {
             if args.operation.val == "status" {
                 guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
                 guard isUnitTest || gridBackendReady else { return .fail(io.err("AeroGrid Backend is still starting")) }
-                return .succ(io.out(try await status(includeDiagnostics: args.data == "diagnostics")))
+                return .succ(io.out(try await status(ownsBackendUI: ownsBackendUI, includeDiagnostics: args.data == "diagnostics")))
             }
             if args.operation.val == "native-status" { return .succ(io.out(try gridNativeStatus())) }
             if args.operation.val == "native-focus" {
@@ -461,7 +461,7 @@ struct GridLayoutCommand: Command {
         return window
     }
 
-    @MainActor private func status(includeDiagnostics: Bool) async throws -> String {
+    @MainActor private func status(ownsBackendUI: Bool, includeDiagnostics: Bool) async throws -> String {
         let nativeDisplaySnapshot = nativeDisplays()
         let displays: [[String: Any]] = sortedMonitorInfos.map { m in
             let index = m.monitorAppKitNsScreenScreensId - 1
@@ -521,6 +521,7 @@ struct GridLayoutCommand: Command {
                     "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
                     "nativeFullscreen": native,
                     "nativeSpace": gridClassifyNativeSpace(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot).rawValue]
+                if ownsBackendUI && gridWindowHasWorkspaceRule(window) { value["ruled"] = true }
                 if native, let monitor = gridNativeMonitor(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
                 inventory.append(value)
                 if includeDiagnostics {

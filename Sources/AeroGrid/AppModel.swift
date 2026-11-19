@@ -9,6 +9,8 @@ final class AppModel: ObservableObject {
     @Published var state = RuntimeState()
     @Published var message = "Iniciando AeroGrid…"
     @Published var organizationError: String?
+    @Published private(set) var setups: [Setup] = []
+    @Published private(set) var missingBundleIDs: [String] = []
     @Published var gestureMessage = "Swipe to inspect recognition"
     @Published private(set) var paused = false { didSet { if paused { input.reset() } } }
     @Published private(set) var pauseChanging = false
@@ -98,11 +100,16 @@ final class AppModel: ObservableObject {
         try config.validate()
         let saved = try store.load(RuntimeState.self, name: "state.json") ?? RuntimeState()
         configuration = config
+        setups = try store.loadSetups()
         backend = AeroSpaceBackend(path: config.backendPath); management = backend
         backend.diagnosticHistory = diagnostics
         if let (_, request) = fixture { backend.filterDesktop = request.fixtureDesktop }
         paused = try store.load(WindowManagerPreferences.self,name:"control.json")?.paused ?? false
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend, store: store)
+        if fixture == nil, let login = LoginSession.consoleLoginDate() {
+            let deadline = login.addingTimeInterval(300)
+            engine.placeRestoreDeadline = Date() < deadline ? deadline : nil
+        }
         input = GestureInput(configuration: config)
         try store.save(config, name: "config.json")
         input.target = { [weak self] in self?.targetDisplay() }
@@ -637,6 +644,8 @@ final class AppModel: ObservableObject {
             if let id = UInt32(args[1]), let window = desktop?.windows?.first(where: { $0.id == id }) { moveWindow(window.identity, to: args[2]) }
         case "arrange" where args.count == 4: arrange(args[1], layout: args[2], orientation: args[3])
         case "reunite" where args.count == 2: reunite(args[1])
+        case "restore-places": restorePlaces()
+        case "apply-setup" where args.count == 2: applySetup(id: args[1])
         case "undo": undoOrganization()
         case "recover": recover()
         case "permissions": requestPermission()
@@ -699,6 +708,65 @@ final class AppModel: ObservableObject {
     func reunite(_ preview: ReunitePreview) {
         perform("reunite", cells: [preview.sourceID]) { try $0.reunite(sourceID: preview.sourceID, expectedOwners: Set(preview.windows.map(\.identity))) }
         reunitePreview = nil
+    }
+    func restorePlaces() {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        var count = 0
+        perform("restorePlaces", completion: { [weak self] error in
+            if error == nil { self?.message = count == 0 ? "Todo está en su lugar" : count == 1 ? "Una ventana volvió a su lugar" : "\(count) ventanas volvieron a su lugar" }
+        }) { engine in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            count = try engine.restorePlaces()
+        }
+    }
+    private func changeSetups(_ action: String, _ change: @escaping (DynamicEngine, inout [Setup]) throws -> Void) {
+        var updated: [Setup] = []
+        perform(action, completion: { [weak self] error in
+            if error == nil { self?.setups = updated }
+        }) { engine in
+            updated = try self.store.loadSetups()
+            try change(engine, &updated)
+            try self.store.saveSetups(updated)
+        }
+    }
+    func saveSetup(name: String) {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        changeSetups("saveSetup") { engine, setups in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            setups.append(try engine.makeSetup(name: name))
+        }
+    }
+    func applySetup(id: String) {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        var result: SetupApplyResult?
+        perform("applySetup", completion: { [weak self] error in
+            if error == nil, let result { self?.missingBundleIDs = result.missingBundleIDs }
+        }) { engine in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            guard let setup = try self.store.loadSetups().first(where: { $0.id == id }) else { throw GridError.stale }
+            result = try engine.applySetup(setup)
+        }
+    }
+    func renameSetup(id: String, name: String) {
+        changeSetups("renameSetup") { _, setups in
+            guard let index = setups.firstIndex(where: { $0.id == id }) else { throw GridError.stale }
+            setups[index].name = name
+        }
+    }
+    func dismissMissingApps() { missingBundleIDs = [] }
+    /// Display name for an app the user is asked to open; shown in the organizer only, never logged.
+    func appDisplayName(bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
+    func deleteSetup(id: String) { changeSetups("deleteSetup") { _, setups in setups.removeAll { $0.id == id } } }
+    func openApp(bundleID: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            message = "No se encontró la app"; return
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+            if error != nil { DispatchQueue.main.async { self?.message = "No se pudo abrir la app" } }
+        }
     }
     func undoOrganization() { perform("undo") { try $0.undo() } }
     func createSpace(near: String? = nil, moving: WindowIdentity? = nil, displayID: String? = nil) {
