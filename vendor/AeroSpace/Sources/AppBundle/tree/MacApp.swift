@@ -137,8 +137,8 @@ final class MacApp: AbstractApp {
         return try await MacWindow.getOrRegister(windowId: windowId, macApp: self)
     }
 
-    @MainActor func nativeFocus(_ windowId: UInt32) {
-        if serverArgs.isReadOnly { return }
+    @discardableResult @MainActor func nativeFocus(_ windowId: UInt32) -> RunLoopJob? {
+        if serverArgs.isReadOnly { return nil }
         MacApp.focusJob?.cancel()
         // Performance optimization. If possible avoid doing AX requests
         // (important for apps which are slow at responding even such basic AX requests. E.g. Godot)
@@ -147,13 +147,18 @@ final class MacApp: AbstractApp {
             (lastNativeFocusedWindowId == windowId || windowsCount == 1)
         {
             nsApp.activate(options: .activateIgnoringOtherApps)
+            return nil
         } else {
-            MacApp.focusJob = withWindowAsync(windowId, .cancellable) { [nsApp] window, job in
+            let focusJob = withWindowAsync(windowId, .cancellable) { [nsApp] window, job in
                 // Raise firstly to make sure that by the time we activate the app, the window would be already on top
                 window.set(Ax.isMainAttr, true)
+                try job.checkCancellation()
                 AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                try job.checkCancellation()
                 nsApp.activate(options: .activateIgnoringOtherApps)
             }
+            MacApp.focusJob = focusJob
+            return focusJob
         }
     }
 

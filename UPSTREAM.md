@@ -9,6 +9,8 @@ The layout fork adds one versioned `grid-layout` command and preserves normal la
 
 Native Space discovery uses optional SkyLight read APIs (also documented in Hammerspoon's `hs.spaces` implementation). Native switches post Dock swipe events using the event-field technique documented by InstantSpaceSwitcher and yabai. Missing symbols and unaccepted switches return errors; no scripting addition or SIP change is required.
 
+For a tracked fullscreen window beyond an intervening Space on a single display, the owned backend first raises and activates the requested window using AeroSpace's native focus path. It verifies the exact native Space after the transition. If activation cannot reach that Space within its bounded attempt, the existing Dock swipe sequence resumes from the current Space.
+
 Remembered native-fullscreen layout trees reconcile their window membership with the current workspace on snapshot and exit. Original fullscreen slots and nested ratios are preserved while closed/moved windows are removed and newly opened groups remain discoverable.
 
 After backend restart, pending fullscreen homes are exposed only when the current boot, WindowServer owner PID, live app, and native display agree. They can be activated by their exact native Space before Accessibility enumerates the window; normal AX discovery then takes over. This avoids requiring a Dock activation to recover a background fullscreen app.

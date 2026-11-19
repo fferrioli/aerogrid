@@ -3,6 +3,7 @@ import Common
 import PrivateApi
 
 @MainActor private var gridDesktopSpaces: [String: UInt64] = [:]
+private let gridNativeTransitionSettle = Duration.milliseconds(300)
 
 @MainActor func gridActivationWindow(_ workspace: Workspace) -> Window? {
     // Normal windows can become most recent while switching away from native fullscreen.
@@ -154,7 +155,8 @@ struct GridFullscreenUnknownTracker {
     }
 }
 
-@MainActor func gridNativeActivate(_ workspace: Workspace, selected: Window? = nil, normal: Bool = false, targetMonitor: MonitorInfo? = nil) async throws {
+@MainActor func gridNativeActivate(_ workspace: Workspace, selected: Window? = nil, normal: Bool = false,
+                                   targetMonitor: MonitorInfo? = nil, preferDirectFullscreenFocus: Bool = false) async throws {
     if isUnitTest { return }
     guard let displays = nativeDisplays(), !displays.isEmpty else { throw NSError(domain: "Native Spaces API unavailable", code: 1) }
     let monitor = targetMonitor ?? workspace.workspaceMonitor
@@ -179,7 +181,32 @@ struct GridFullscreenUnknownTracker {
             ?? display.spaces.first(where: { $0.type == 0 })?.id
     }
     guard let destination else { throw NSError(domain: "Native fullscreen target isn't available on this display", code: 1) }
+    if preferDirectFullscreenFocus, monitorInfos.count == 1, let fullscreen = fullscreen as? MacWindow,
+       gridHasInterveningSpace(display, destination: destination),
+       try await gridTryDirectFullscreenFocus(fullscreen, displayID: display.id, destination: destination) {
+        return
+    }
     try await gridNativeSwitch(display: display, destination: destination, monitor: monitor)
+}
+
+func gridHasInterveningSpace(_ display: GridNativeDisplay, destination: UInt64) -> Bool {
+    guard let start = display.spaces.firstIndex(where: { $0.id == display.current }),
+          let end = display.spaces.firstIndex(where: { $0.id == destination }) else { return false }
+    return abs(end - start) > 1
+}
+
+@MainActor private func gridTryDirectFullscreenFocus(_ window: MacWindow, displayID: String, destination: UInt64) async throws -> Bool {
+    // Activation can select another window of the same app or leave the current Space unchanged.
+    let focusJob = window.macAppUnsafe.nativeFocus(window.windowId)
+    defer { focusJob?.cancel() }
+    for _ in 0..<10 {
+        try await Task.sleep(for: .milliseconds(30))
+        if nativeDisplays()?.first(where: { $0.id == displayID })?.current == destination {
+            try await Task.sleep(for: gridNativeTransitionSettle)
+            return nativeDisplays()?.first(where: { $0.id == displayID })?.current == destination
+        }
+    }
+    return false
 }
 
 @MainActor func gridNativeFocusSpace(_ space: UInt64) async throws {
@@ -215,7 +242,7 @@ struct GridFullscreenUnknownTracker {
         guard changed else { throw NSError(domain: "macOS did not accept the native Space switch", code: 1) }
         // The current Space changes before Dock finishes its transition. Posting another
         // swipe or raising a window immediately can interrupt that transition.
-        try await Task.sleep(for: .milliseconds(300))
+        try await Task.sleep(for: gridNativeTransitionSettle)
     }
     if nativeDisplays()?.first(where: { $0.id == display.id })?.current == destination { return }
     throw NSError(domain: "Native Space navigation did not reach its target", code: 1)
