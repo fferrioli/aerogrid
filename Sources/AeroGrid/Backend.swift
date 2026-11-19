@@ -5,6 +5,7 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
     var path: String
     var diagnosticHistory: DiagnosticHistory?
     var diagnosticOperation: UUID?
+    var filterDesktop: ((Desktop) throws -> Desktop)?
     init(path: String) { self.path = path }
     @discardableResult func run(_ arguments: [String]) throws -> String {
         let history = diagnosticHistory
@@ -66,11 +67,15 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
         do {
             let args = includePlacement ? ["grid-layout", "--data", "diagnostics", "status"] : ["grid-layout", "status"]
             let data = Data(try run(args).utf8)
-            guard includePlacement, let history, history.enabled else { return try decoder.decode(Desktop.self, from: data) }
+            guard includePlacement, let history, history.enabled else {
+                let desktop = try decoder.decode(Desktop.self, from: data)
+                return try filterDesktop?(desktop) ?? desktop
+            }
             let status = try decoder.decode(DiagnosticBackendStatus.self, from: data)
-            let snapshot = DiagnosticSnapshot(desktop: status.desktop, placement: status.placement, aliases: history.aliases)
+            let desktop = try filterDesktop?(status.desktop) ?? status.desktop
+            let snapshot = DiagnosticSnapshot(desktop: desktop, placement: status.placement, aliases: history.aliases)
             history.observe(.backend, snapshot, operation: diagnosticOperation)
-            return status.desktop
+            return desktop
         } catch {
             if includePlacement, let history, history.enabled {
                 history.observe(.backend, .unavailableBackend, operation: diagnosticOperation)

@@ -3,25 +3,27 @@ import GridCore
 
 /// Integration checks move only disposable fixture windows. The outer Python harness restores the desktop.
 enum DynamicVerification {
-    static func run(output: URL, nativeChecks: Bool = true) throws {
-        let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/aerogrid-aerospace").path
+    static func run(token: String, nativeChecks: Bool) throws {
+        let (run, request) = try FixtureSession.verificationRequest(token: token)
+        let output = run.appendingPathComponent("live-dynamic.txt")
+        let path = FixtureSession.backend
         let real = AeroSpaceBackend(path: path)
         let desktop = try real.desktop()
-        guard let external = desktop.displays.first(where: { !$0.builtin }), let laptop = desktop.displays.first(where: \.builtin) else { throw GridError.unavailable("Connect both displays for live dynamic checks") }
-        let fixtures = (desktop.windows ?? []).filter { $0.title.hasPrefix("AeroGrid Verification ") }.sorted { $0.title < $1.title }
+        guard desktop.displays.count == 2, let external = desktop.displays.first(where: { !$0.builtin }), let laptop = desktop.displays.first(where: \.builtin) else { throw GridError.unavailable("Connect both displays for live dynamic checks") }
+        let fixtures = (desktop.windows ?? []).filter { $0.pid == request.pid && $0.workspace == request.workspace && $0.title.hasPrefix("AeroGrid Verification ") }.sorted { $0.title < $1.title }
         guard fixtures.count == 3 else { throw GridError.invalid("Start exactly three disposable fixture windows") }
-        let adapter = FixtureBackend(real: real, ids: Set(fixtures.map(\.id)))
+        let adapter = FixtureBackend(real: real, request: request, ids: Set(fixtures.map(\.id)))
+        _ = try request.fixtureDesktop(desktop)
         var config = Configuration(backendPath: path)
-        let source = Cell(id: "verification-source", row: 0, column: 0, name: "Verification", workspace: "grid-dynamic-verification")
-        let empty = Cell(id: "verification-laptop", row: 0, column: 0, name: "Laptop verification", workspace: "grid-dynamic-verification-laptop")
+        let source = Cell(id: request.workspace, row: 0, column: 0, name: "Verification", workspace: request.workspace)
+        let empty = Cell(id: "verification-laptop", row: 0, column: 0, name: "Laptop verification", workspace: request.workspace + "-laptop")
         config.grids = [GridCore.Grid(id: "verification-laptop-grid", name: "Laptop", displayRole: "builtin", cells: [empty]), GridCore.Grid(id: "verification-external-grid", name: "External", displayRole: "external", cells: [source])]
-        for window in fixtures { try real.move(window: window.id, workspace: source.workspace) }
         let stack = LayoutNode.root(fixtures.dropFirst().map { LayoutNode(id: $0.id, pid: $0.pid) }, layout: "accordion")
         let original = LayoutSnapshot(boot: fixtures[0].boot, tree: .root([LayoutNode(id: fixtures[0].id, pid: fixtures[0].pid, weight: 2), stack]), focus: fixtures[0].id)
         try real.restore(workspace: source.workspace, snapshot: original.json())
         try real.activateTarget(workspace: source.workspace, monitor: external.monitor, window: nil)
         try real.activateTarget(workspace: empty.workspace, monitor: laptop.monitor, window: nil)
-        let engine = try DynamicEngine(configuration: config, backend: adapter)
+        let engine = try DynamicEngine(configuration: config, backend: adapter, store: Store(directory: run))
         try engine.refresh()
         var passed: [String] = []
         func record(_ message: String) throws {
@@ -126,13 +128,14 @@ enum DynamicVerification {
 }
 private final class FixtureBackend: Backend {
     let real: AeroSpaceBackend
+    let request: FixtureSession.Request
     let ids: Set<UInt32>
     var folded = false
-    init(real: AeroSpaceBackend, ids: Set<UInt32>) { self.real = real; self.ids = ids }
+    init(real: AeroSpaceBackend, request: FixtureSession.Request, ids: Set<UInt32>) {
+        self.real = real; self.request = request; self.ids = ids
+    }
     func desktop() throws -> Desktop {
-        var desktop = try real.desktop()
-        desktop.windows = desktop.windows?.filter { ids.contains($0.id) }
-        desktop.windowHomes = desktop.windowHomes?.filter { ids.contains($0.id) }
+        var desktop = try request.fixtureDesktop(real.desktop())
         if folded {
             desktop.displays = desktop.displays.filter(\.builtin)
             let monitors = Set(desktop.displays.map(\.monitor))
@@ -151,6 +154,10 @@ private final class FixtureBackend: Backend {
     func windows(workspace: String) throws -> [UInt32] { try real.windows(workspace: workspace).filter(ids.contains) }
     func move(window: UInt32, workspace: String) throws { guard ids.contains(window) else { throw GridError.invalid("Not a fixture") }; try real.move(window: window, workspace: workspace) }
     func moveVerified(window: WindowIdentity, workspace: String) throws { guard ids.contains(window.id) else { throw GridError.invalid("Not a fixture") }; try real.moveVerified(window: window, workspace: workspace) }
+    func moveFullscreen(window: WindowIdentity, workspace: String) throws {
+        guard ids.contains(window.id) else { throw GridError.invalid("Not a fixture") }
+        try real.moveFullscreen(window: window, workspace: workspace)
+    }
     func snapshot(workspace: String) throws -> String { try real.snapshot(workspace: workspace) }
     func restore(workspace: String, snapshot: String) throws { try real.restore(workspace: workspace, snapshot: snapshot) }
     func layout(workspace: String, profile: String) throws { try real.layout(workspace: workspace, profile: profile) }

@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     private var managementNeedsSync = true
     private var backendLaunchPolicy = BackendLaunchPolicy()
     private var shuttingDown = false
+    private var leavingBackendRunning = false
     @Published var testingGestures = false { didSet { if testingGestures { input.reset() } } }
     @Published private(set) var recordingLocalDiagnostics: Bool
     @Published var recordingGesturePackets = false {
@@ -77,19 +78,29 @@ final class AppModel: ObservableObject {
     @Published var draggedSpace: String?
     @Published var mergePreview: MergePreview?
     @Published var reunitePreview: ReunitePreview?
-    init() throws {
-        directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
+    init(fixture: (URL, FixtureSession.Request)? = nil) throws {
+        directory = fixture?.0 ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
         store = try Store(directory: directory)
-        let enabled = diagnosticsPreference.enabled
+        let enabled = fixture != nil || diagnosticsPreference.enabled
         recordingLocalDiagnostics = enabled
         diagnostics = DiagnosticHistory(directory: directory.appendingPathComponent(DiagnosticLogFile.directoryName, isDirectory: true), enabled: enabled)
-        let defaultBackend = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/AeroGrid Backend.app/Contents/Resources/aerospace").path
-        let config = try store.load(Configuration.self, name: "config.json") ?? Configuration(backendPath: defaultBackend)
+        let config: Configuration
+        if let (_, request) = fixture {
+            let role = request.display.builtin ? "builtin" : "external"
+            var isolated = Configuration(backendPath: FixtureSession.backend)
+            let cell = Cell(id: request.workspace, row: 0, column: 0, name: "Fixture", workspace: request.workspace)
+            isolated.grids = [GridCore.Grid(id: "fixture", name: "Fixture", displayRole: role, cells: [cell])]
+            isolated.displayAssignments = [role: request.display.id]
+            config = isolated
+        } else {
+            config = try store.load(Configuration.self, name: "config.json") ?? Configuration(backendPath: FixtureSession.backend)
+        }
         try config.validate()
         let saved = try store.load(RuntimeState.self, name: "state.json") ?? RuntimeState()
         configuration = config
         backend = AeroSpaceBackend(path: config.backendPath); management = backend
         backend.diagnosticHistory = diagnostics
+        if let (_, request) = fixture { backend.filterDesktop = request.fixtureDesktop }
         paused = try store.load(WindowManagerPreferences.self,name:"control.json")?.paused ?? false
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend, store: store)
         input = GestureInput(configuration: config)
@@ -361,6 +372,16 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    func refreshFixture() {
+        _ = updateGate()
+        guard reconciliationOpen.value else { return }
+        perform("refresh", feedback: false) { try $0.refresh() }
+    }
+    func openFixtureSpace(_ id: String, display: String) {
+        _ = updateGate()
+        guard reconciliationOpen.value else { return }
+        openSpace(id, displayID: display, feedback: false)
+    }
     func navigate(_ direction: Direction, scope: Scope, displayID: String? = nil) {
         let id = displayID ?? targetDisplay()
         perform("navigate", display: id, direction: direction, scope: scope) { try $0.navigate(direction, scope: scope, displayID: id) }
@@ -452,14 +473,16 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func prepareToQuit(_ completion:@escaping () -> Void) {
+    func prepareToQuit(preservingBackend: Bool = false, _ completion:@escaping () -> Void) {
         diagnostics.event("lifecycle", ["event": "stopping"])
         shuttingDown = true
+        leavingBackendRunning = preservingBackend
         pauseChanging = true; input.stop(); deferredContacts.removeAll(); pendingOperations.removeAll(); closeOverview?(false)
         queue.async {
-            if !self.isPreview && self.ownsBackend { try? self.backend.setManagementEnabled(false) }
+            let stopBackend = !preservingBackend && !self.isPreview && self.ownsBackend
+            if stopBackend { try? self.backend.setManagementEnabled(false) }
             DispatchQueue.main.async {
-                if !self.isPreview && self.ownsBackend {
+                if stopBackend {
                     for app in NSRunningApplication.runningApplications(withBundleIdentifier:"local.AeroGrid.Backend") { app.terminate() }
                 }
                 completion()
@@ -486,7 +509,10 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.openApplication(at:url,configuration:options) { [weak self] application, error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.shuttingDown { application?.terminate(); return }
+                if self.shuttingDown {
+                    if !self.leavingBackendRunning { application?.terminate() }
+                    return
+                }
                 self.diagnostics.event("lifecycle", ["event": error == nil ? "backend-launched" : "backend-launch-failed"])
                 guard error != nil else { return }
                 self.message = "No se pudo iniciar el servicio de AeroGrid. Usá Recuperar."
@@ -628,8 +654,8 @@ final class AppModel: ObservableObject {
         if let identity = space.nativeWindow { return (desktop?.windows ?? []).filter { $0.identity == identity } }
         return (desktop?.windows ?? []).filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
     }
-    func openSpace(_ id: String, displayID: String?) {
-        perform("openSpace", cells: [id], display: displayID) { engine in
+    func openSpace(_ id: String, displayID: String?, feedback: Bool = true) {
+        perform("openSpace", cells: [id], display: displayID, feedback: feedback) { engine in
             try engine.jump(cellID: id, displayID: displayID)
             DispatchQueue.main.async { self.closeOverview?(false) }
         }
