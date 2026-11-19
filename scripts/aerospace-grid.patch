@@ -155,10 +155,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..d2844f3
+index 0000000..26db8e1
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,705 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -556,7 +556,8 @@ index 0000000..d2844f3
 +                        }
 +                        window.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
 +                    }
-+                    try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor)
++                    try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor,
++                                                 preferDirectFullscreenFocus: ownsBackendUI && request.window != nil)
 +                    if let window {
 +                        guard window.focusWindow() else { return .fail(io.err("Window could not be focused")) }
 +                        window.nativeFocus()
@@ -865,15 +866,16 @@ index 0000000..d2844f3
 +}
 diff --git a/Sources/AppBundle/command/impl/GridNativeSpaces.swift b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
 new file mode 100644
-index 0000000..1c0af2b
+index 0000000..305918e
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridNativeSpaces.swift
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,267 @@
 +import AppKit
 +import Common
 +import PrivateApi
 +
 +@MainActor private var gridDesktopSpaces: [String: UInt64] = [:]
++private let gridNativeTransitionSettle = Duration.milliseconds(300)
 +
 +@MainActor func gridActivationWindow(_ workspace: Workspace) -> Window? {
 +    // Normal windows can become most recent while switching away from native fullscreen.
@@ -1025,7 +1027,8 @@ index 0000000..1c0af2b
 +    }
 +}
 +
-+@MainActor func gridNativeActivate(_ workspace: Workspace, selected: Window? = nil, normal: Bool = false, targetMonitor: MonitorInfo? = nil) async throws {
++@MainActor func gridNativeActivate(_ workspace: Workspace, selected: Window? = nil, normal: Bool = false,
++                                   targetMonitor: MonitorInfo? = nil, preferDirectFullscreenFocus: Bool = false) async throws {
 +    if isUnitTest { return }
 +    guard let displays = nativeDisplays(), !displays.isEmpty else { throw NSError(domain: "Native Spaces API unavailable", code: 1) }
 +    let monitor = targetMonitor ?? workspace.workspaceMonitor
@@ -1050,7 +1053,32 @@ index 0000000..1c0af2b
 +            ?? display.spaces.first(where: { $0.type == 0 })?.id
 +    }
 +    guard let destination else { throw NSError(domain: "Native fullscreen target isn't available on this display", code: 1) }
++    if preferDirectFullscreenFocus, monitorInfos.count == 1, let fullscreen = fullscreen as? MacWindow,
++       gridHasInterveningSpace(display, destination: destination),
++       try await gridTryDirectFullscreenFocus(fullscreen, displayID: display.id, destination: destination) {
++        return
++    }
 +    try await gridNativeSwitch(display: display, destination: destination, monitor: monitor)
++}
++
++func gridHasInterveningSpace(_ display: GridNativeDisplay, destination: UInt64) -> Bool {
++    guard let start = display.spaces.firstIndex(where: { $0.id == display.current }),
++          let end = display.spaces.firstIndex(where: { $0.id == destination }) else { return false }
++    return abs(end - start) > 1
++}
++
++@MainActor private func gridTryDirectFullscreenFocus(_ window: MacWindow, displayID: String, destination: UInt64) async throws -> Bool {
++    // Activation can select another window of the same app or leave the current Space unchanged.
++    let focusJob = window.macAppUnsafe.nativeFocus(window.windowId)
++    defer { focusJob?.cancel() }
++    for _ in 0..<10 {
++        try await Task.sleep(for: .milliseconds(30))
++        if nativeDisplays()?.first(where: { $0.id == displayID })?.current == destination {
++            try await Task.sleep(for: gridNativeTransitionSettle)
++            return nativeDisplays()?.first(where: { $0.id == displayID })?.current == destination
++        }
++    }
++    return false
 +}
 +
 +@MainActor func gridNativeFocusSpace(_ space: UInt64) async throws {
@@ -1086,7 +1114,7 @@ index 0000000..1c0af2b
 +        guard changed else { throw NSError(domain: "macOS did not accept the native Space switch", code: 1) }
 +        // The current Space changes before Dock finishes its transition. Posting another
 +        // swipe or raising a window immediately can interrupt that transition.
-+        try await Task.sleep(for: .milliseconds(300))
++        try await Task.sleep(for: gridNativeTransitionSettle)
 +    }
 +    if nativeDisplays()?.first(where: { $0.id == display.id })?.current == destination { return }
 +    throw NSError(domain: "Native Space navigation did not reach its target", code: 1)
@@ -1481,7 +1509,7 @@ index fc7bed7..0e1f297 100644
              await answerToClient(
                  exitCode: EXIT_CODE_TWO,
 diff --git a/Sources/AppBundle/tree/MacApp.swift b/Sources/AppBundle/tree/MacApp.swift
-index 94abdf7..2ee8adc 100644
+index 94abdf7..d945fe3 100644
 --- a/Sources/AppBundle/tree/MacApp.swift
 +++ b/Sources/AppBundle/tree/MacApp.swift
 @@ -49,6 +49,8 @@ final class MacApp: AbstractApp {
@@ -1508,7 +1536,38 @@ index 94abdf7..2ee8adc 100644
      // todo merge together with detectNewWindows
      func getFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
          let windowId = try await thread?.runInLoop(cm) { [nsApp, axApp, windows] job in
-@@ -264,11 +274,12 @@ final class MacApp: AbstractApp {
+@@ -127,8 +137,8 @@ final class MacApp: AbstractApp {
+         return try await MacWindow.getOrRegister(windowId: windowId, macApp: self)
+     }
+ 
+-    @MainActor func nativeFocus(_ windowId: UInt32) {
+-        if serverArgs.isReadOnly { return }
++    @discardableResult @MainActor func nativeFocus(_ windowId: UInt32) -> RunLoopJob? {
++        if serverArgs.isReadOnly { return nil }
+         MacApp.focusJob?.cancel()
+         // Performance optimization. If possible avoid doing AX requests
+         // (important for apps which are slow at responding even such basic AX requests. E.g. Godot)
+@@ -137,13 +147,18 @@ final class MacApp: AbstractApp {
+             (lastNativeFocusedWindowId == windowId || windowsCount == 1)
+         {
+             nsApp.activate(options: .activateIgnoringOtherApps)
++            return nil
+         } else {
+-            MacApp.focusJob = withWindowAsync(windowId, .cancellable) { [nsApp] window, job in
++            let focusJob = withWindowAsync(windowId, .cancellable) { [nsApp] window, job in
+                 // Raise firstly to make sure that by the time we activate the app, the window would be already on top
+                 window.set(Ax.isMainAttr, true)
++                try job.checkCancellation()
+                 AXUIElementPerformAction(window, kAXRaiseAction as CFString)
++                try job.checkCancellation()
+                 nsApp.activate(options: .activateIgnoringOtherApps)
+             }
++            MacApp.focusJob = focusJob
++            return focusJob
+         }
+     }
+ 
+@@ -264,11 +279,12 @@ final class MacApp: AbstractApp {
                  await app.destroy()
              }
          }
@@ -1522,7 +1581,7 @@ index 94abdf7..2ee8adc 100644
                  }
              }
              // Register new apps
-@@ -297,7 +308,7 @@ final class MacApp: AbstractApp {
+@@ -297,7 +313,7 @@ final class MacApp: AbstractApp {
          }
      }
  
@@ -1531,7 +1590,7 @@ index 94abdf7..2ee8adc 100644
          if nsApp.isTerminated {
              await destroy()
              return []
-@@ -308,7 +319,7 @@ final class MacApp: AbstractApp {
+@@ -308,7 +324,7 @@ final class MacApp: AbstractApp {
              var dead = [UInt32: AxWindow]()
              // Second line of defence against lock screen. See the first line of defence: closedWindowsCache
              // Second and third lines of defence are technically needed only to avoid potential flickering
@@ -2262,10 +2321,10 @@ index 0000000..68df680
 +}
 diff --git a/Sources/AppBundleTests/command/GridLayoutCommandTest.swift b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
 new file mode 100644
-index 0000000..2b5b2ca
+index 0000000..4f0730e
 --- /dev/null
 +++ b/Sources/AppBundleTests/command/GridLayoutCommandTest.swift
-@@ -0,0 +1,784 @@
+@@ -0,0 +1,794 @@
 +@testable import AppBundle
 +import Common
 +import CoreGraphics
@@ -2345,6 +2404,16 @@ index 0000000..2b5b2ca
 +        XCTAssertEqual(gridDiagnosticNativeCatalog([shared], monitorsByID: ["a": 1], physicalDisplayCount: 1).first?["monitor"] as? Int, 1)
 +        let separate = GridNativeDisplay(id: "B", current: 3, spaces: [(3, 0)])
 +        XCTAssertEqual(gridDiagnosticNativeCatalog([separate], monitorsByID: ["a": 1, "b": 2], physicalDisplayCount: 2).first?["monitor"] as? Int, 2)
++    }
++
++    func testDirectFocusOnlySkipsInterveningSpaces() {
++        var display = GridNativeDisplay(id: "display", current: 3, spaces: [(9, 0), (3, 4), (8, 4), (2, 4)])
++        XCTAssertTrue(gridHasInterveningSpace(display, destination: 2))
++        XCTAssertFalse(gridHasInterveningSpace(display, destination: 8))
++        XCTAssertFalse(gridHasInterveningSpace(display, destination: 3))
++        XCTAssertFalse(gridHasInterveningSpace(display, destination: 99))
++        display.current = 2
++        XCTAssertTrue(gridHasInterveningSpace(display, destination: 3))
 +    }
 +    func testNormalAndNativeTargetsInSharedWorkspaceAreIndependent() async throws {
 +        let ws = Workspace.get(byName: name)

@@ -78,6 +78,16 @@ import XCTest
         let separate = GridNativeDisplay(id: "B", current: 3, spaces: [(3, 0)])
         XCTAssertEqual(gridDiagnosticNativeCatalog([separate], monitorsByID: ["a": 1, "b": 2], physicalDisplayCount: 2).first?["monitor"] as? Int, 2)
     }
+
+    func testDirectFocusOnlySkipsInterveningSpaces() {
+        var display = GridNativeDisplay(id: "display", current: 3, spaces: [(9, 0), (3, 4), (8, 4), (2, 4)])
+        XCTAssertTrue(gridHasInterveningSpace(display, destination: 2))
+        XCTAssertFalse(gridHasInterveningSpace(display, destination: 8))
+        XCTAssertFalse(gridHasInterveningSpace(display, destination: 3))
+        XCTAssertFalse(gridHasInterveningSpace(display, destination: 99))
+        display.current = 2
+        XCTAssertTrue(gridHasInterveningSpace(display, destination: 3))
+    }
     func testNormalAndNativeTargetsInSharedWorkspaceAreIndependent() async throws {
         let ws = Workspace.get(byName: name)
         let full = TestWindow.new(id: 1, parent: ws.rootTilingContainer)

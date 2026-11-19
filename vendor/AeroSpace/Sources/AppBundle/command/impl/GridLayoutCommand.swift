@@ -395,7 +395,8 @@ struct GridLayoutCommand: Command {
                         }
                         window.bind(to: ws.macOsNativeFullscreenWindowsContainer, adaptiveWeight: WEIGHT_DOESNT_MATTER, index: INDEX_BIND_LAST)
                     }
-                    try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor)
+                    try await gridNativeActivate(ws, selected: window, normal: request.window == nil, targetMonitor: monitor,
+                                                 preferDirectFullscreenFocus: ownsBackendUI && request.window != nil)
                     if let window {
                         guard window.focusWindow() else { return .fail(io.err("Window could not be focused")) }
                         window.nativeFocus()
