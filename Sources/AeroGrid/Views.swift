@@ -107,7 +107,11 @@ struct SettingsView: View {
                 Button("Import configuration") { model.importConfig() }
                 Button("Open local files") { NSWorkspace.shared.open(model.directory) }
             }
+            Toggle("Record local window and Space diagnostics",
+                   isOn: Binding(get: { model.recordingLocalDiagnostics }, set: model.setLocalDiagnostics))
+            Text("Keeps recent window placement and troubleshooting history on this Mac. Turning it off stops recording and keeps existing files.").font(.caption).foregroundStyle(.secondary)
             Toggle("Record detailed gesture packets", isOn: $model.recordingGesturePackets)
+                .disabled(!model.recordingLocalDiagnostics)
             Text("Enable only while reproducing a gesture problem. Turns off when AeroGrid restarts.").font(.caption).foregroundStyle(.secondary)
             TextField("AeroSpace CLI", text: $draft.backendPath)
             Text("Advanced input configuration. Organize the dynamic map from the organizer; legacy grid definitions are preserved for recovery.").font(.caption)

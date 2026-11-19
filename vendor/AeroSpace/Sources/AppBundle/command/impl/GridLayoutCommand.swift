@@ -115,6 +115,7 @@ struct GridDeferredNativeWindow {
     var monitor: Int
     var appName: String
     var bundleID: String
+    var spaceIDs: [UInt64]? = nil
 
     var inventory: [String: Any] {
         ["id": home.id, "pid": home.pid, "boot": home.boot, "workspace": home.workspace,
@@ -129,24 +130,29 @@ struct GridDeferredNativeWindow {
 @MainActor private var gridPendingHomePruning: [UInt32: GridPendingHomePruning] = [:]
 @MainActor private var gridPendingWindowHomes: [UInt32: GridWindowHome] = [:]
 
-@MainActor private func gridDeferredNativeWindows(displays: [GridNativeDisplay]? = nativeDisplays()) -> [GridDeferredNativeWindow] {
+@MainActor private func gridDeferredNativeWindows(displays: [GridNativeDisplay]? = nativeDisplays(),
+                                                   observedOwners: [UInt32: Int32]? = nil) -> [GridDeferredNativeWindow] {
     let pending = gridPendingWindowHomes.values.filter { !gridDebugForgets($0.id) && Window.get(byId: $0.id) == nil }
-    guard !pending.isEmpty else { return [] }
-    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
-    var owners: [UInt32: Int32] = [:]
-    for entry in entries {
-        if let id = entry[kCGWindowNumber as String] as? NSNumber,
-           let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
+    guard !pending.isEmpty, let displays else { return [] }
+    var owners = observedOwners ?? [:]
+    if observedOwners == nil {
+        let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        for entry in entries {
+            if let window = GridServerWindow(entry, includeGeometry: false) { owners[window.id] = window.pid }
+        }
     }
     var evidence = GridNativeRecoveryEvidence(boot: gridBootIdentity(), owners: owners, monitors: [:])
+    var memberships: [UInt32: [UInt64]] = [:]
     for home in pending where home.boot == evidence.boot && owners[home.id] == home.pid {
-        evidence.monitors[home.id] = gridNativeMonitor(windowID: home.id, displays: displays)?.monitorId_oneBased
+        let spaceIDs = gridWindowSpaceIDs(home.id)
+        memberships[home.id] = spaceIDs
+        evidence.monitors[home.id] = gridNativeMonitor(windowSpaces: spaceIDs, displays: displays)?.monitorId_oneBased
     }
     return pending.sorted { $0.id < $1.id }.compactMap { home in
         guard evidence.validates(home), let monitor = evidence.monitors[home.id],
               let app = NSRunningApplication(processIdentifier: home.pid), !app.isTerminated else { return nil }
         return GridDeferredNativeWindow(home: home, monitor: monitor,
-            appName: app.localizedName ?? "Application", bundleID: app.bundleIdentifier ?? "")
+            appName: app.localizedName ?? "Application", bundleID: app.bundleIdentifier ?? "", spaceIDs: memberships[home.id])
     }
 }
 
@@ -271,7 +277,7 @@ struct GridLayoutCommand: Command {
             if args.operation.val == "status" {
                 guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
                 guard isUnitTest || gridBackendReady else { return .fail(io.err("AeroGrid Backend is still starting")) }
-                return .succ(io.out(try await status()))
+                return .succ(io.out(try await status(includeDiagnostics: args.data == "diagnostics")))
             }
             if args.operation.val == "native-status" { return .succ(io.out(try gridNativeStatus())) }
             if args.operation.val == "native-focus" {
@@ -432,7 +438,7 @@ struct GridLayoutCommand: Command {
         } catch { return .fail(io.err("grid-layout: \(error.localizedDescription)")) }
     }
 
-    @MainActor private func status() async throws -> String {
+    @MainActor private func status(includeDiagnostics: Bool) async throws -> String {
         let nativeDisplaySnapshot = nativeDisplays()
         let displays: [[String: Any]] = sortedMonitorInfos.map { m in
             let index = m.monitorAppKitNsScreenScreensId - 1
@@ -446,7 +452,10 @@ struct GridLayoutCommand: Command {
         let visible = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.map { (String($0.monitorId_oneBased ?? 0), $0.activeWorkspace.name) })
         var nativeHomes = gridNativeWorkspaceMonitors(displays: nativeDisplaySnapshot)
         var nativeVisible = gridNativeVisibleWindows(displays: nativeDisplaySnapshot)
-        let focusedMonitor = focus.windowOrNil.flatMap { gridNativeMonitor($0, displays: nativeDisplaySnapshot)?.monitorId_oneBased }
+        let focusedWindow = focus.windowOrNil
+        let frontmostPID = includeDiagnostics ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
+        let heldWorkspace = includeDiagnostics ? gridFocusRecovery.diagnosticHeldWorkspace : nil
+        let focusedMonitor = focusedWindow.flatMap { gridNativeMonitor($0, displays: nativeDisplaySnapshot)?.monitorId_oneBased }
             ?? focus.workspace.workspaceMonitor.monitorId_oneBased ?? 1
         let boot = gridBootIdentity()
         let actualHomes: [GridWindowHome] = Workspace.all.flatMap { workspace in
@@ -460,17 +469,16 @@ struct GridLayoutCommand: Command {
         let locked = gridSessionIsLocked()
         let now = ProcessInfo.processInfo.systemUptime
         let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
-        var owners: [UInt32: Int32] = [:]
+        var serverWindows: [UInt32: GridServerWindow] = [:]
         for entry in entries {
-            if let id = entry[kCGWindowNumber as String] as? NSNumber,
-               let pid = entry[kCGWindowOwnerPID as String] as? NSNumber { owners[id.uint32Value] = pid.int32Value }
+            if let window = GridServerWindow(entry, includeGeometry: includeDiagnostics) { serverWindows[window.id] = window }
         }
         for home in Array(gridPendingWindowHomes.values) {
             if gridDebugForgets(home.id) { gridForgetRecoveredWindowHome(home.id); continue }
             var policy = gridPendingHomePruning[home.id] ?? GridPendingHomePruning()
             let app = NSRunningApplication(processIdentifier: home.pid)
             if policy.shouldDiscard(processAlive: isUnitTest || (app != nil && app?.isTerminated == false),
-                sameBoot: home.boot == boot, ownerMatches: owners[home.id] == home.pid, locked: locked, now: now) {
+                sameBoot: home.boot == boot, ownerMatches: serverWindows[home.id]?.pid == home.pid, locked: locked, now: now) {
                 gridForgetRecoveredWindowHome(home.id)
                 continue
             }
@@ -479,27 +487,69 @@ struct GridLayoutCommand: Command {
         }
         let homes = try JSONSerialization.jsonObject(with: JSONEncoder().encode(homeByID.keys.sorted().compactMap { homeByID[$0] }))
         var inventory: [[String: Any]] = []
+        var placements: [String: [String: Any]] = [:]
         for ws in Workspace.all {
             for window in ws.allLeafWindowsRecursive where window.app.rawAppBundleId != "local.AeroGrid" {
                 let native = window.parent is MacosFullscreenWindowsContainer
+                let spaceIDs = gridWindowSpaceIDs(window.windowId)
                 var value: [String: Any] = ["id": window.windowId, "pid": window.app.pid, "boot": boot,
                     "workspace": ws.name, "floating": window.isFloating, "monitor": ws.workspaceMonitor.monitorId_oneBased ?? 0,
                     "title": (try? await window.getTitle(.nonCancellable)) ?? "",
                     "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
                     "nativeFullscreen": native,
-                    "nativeSpace": gridNativeSpaceKind(windowID: window.windowId, displays: nativeDisplaySnapshot).rawValue]
-                if let monitor = gridNativeMonitor(window, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
+                    "nativeSpace": gridClassifyNativeSpace(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot).rawValue]
+                if native, let monitor = gridNativeMonitor(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
                 inventory.append(value)
+                if includeDiagnostics {
+                    placements[String(window.windowId)] = gridWindowPlacement(
+                        serverWindow: serverWindows[window.windowId], pid: window.app.pid, spaceIDs: spaceIDs, deferred: false)
+                }
             }
         }
-        for deferred in gridDeferredNativeWindows(displays: nativeDisplaySnapshot) {
+        let deferredWindows = gridPendingWindowHomes.isEmpty ? [] : gridDeferredNativeWindows(
+            displays: nativeDisplaySnapshot, observedOwners: serverWindows.mapValues(\.pid))
+        for deferred in deferredWindows {
             inventory.append(deferred.inventory)
             nativeHomes[deferred.home.workspace] = deferred.monitor
-            if gridNativeWindowIsVisible(deferred.home.id, displays: nativeDisplaySnapshot) { nativeVisible[String(deferred.monitor)] = deferred.home.id }
+            if nativeDisplaySnapshot?.contains(where: { deferred.spaceIDs?.contains($0.current) == true }) == true {
+                nativeVisible[String(deferred.monitor)] = deferred.home.id
+            }
+            if includeDiagnostics {
+                placements[String(deferred.home.id)] = gridWindowPlacement(
+                    serverWindow: serverWindows[deferred.home.id], pid: deferred.home.pid,
+                    spaceIDs: deferred.spaceIDs, deferred: true)
+            }
         }
-        let value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
+        var value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,
-                                  "focusedWindow": focus.windowOrNil.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 2]
+                                  "focusedWindow": focusedWindow.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 3]
+        if includeDiagnostics {
+            let workspaces = Workspace.all.map { workspace in
+                ["name": workspace.name, "monitor": workspace.workspaceMonitor.monitorId_oneBased ?? 0] as [String: Any]
+            }
+            let displayFrames = Dictionary(uniqueKeysWithValues: sortedMonitorInfos.compactMap { monitor -> (String, [String: Double])? in
+                let screen = NSScreen.screens[monitor.monitorAppKitNsScreenScreensId - 1]
+                guard let id = monitor.monitorId_oneBased,
+                      let cg = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+                      let frame = gridDiagnosticFrame(CGDisplayBounds(cg)) else { return nil }
+                return (String(id), frame)
+            })
+            var diagnostic: [String: Any] = ["windows": placements, "workspaces": workspaces,
+                "displayFrames": displayFrames, "locked": locked, "pendingWindowIDs": gridPendingWindowHomes.keys.sorted()]
+            diagnostic["focusHoldWorkspace"] = heldWorkspace
+            if let frontmostPID, let focusedWindow {
+                diagnostic["frontmostMatchesFocusedWindowOwner"] = frontmostPID == focusedWindow.app.pid
+            }
+            if let nativeDisplaySnapshot {
+                let monitorsByID = Dictionary(displays.compactMap { display -> (String, Int)? in
+                    guard let id = display["id"] as? String, let monitor = display["monitor"] as? Int, monitor > 0 else { return nil }
+                    return (id.lowercased(), monitor)
+                }, uniquingKeysWith: { _, last in last })
+                diagnostic["nativeDisplays"] = gridDiagnosticNativeCatalog(nativeDisplaySnapshot, monitorsByID: monitorsByID,
+                    physicalDisplayCount: displays.count)
+            }
+            value["placementDiagnostics"] = diagnostic
+        }
         return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
     @MainActor private func captureNode(_ node: TreeNode) -> GridLayoutNode {

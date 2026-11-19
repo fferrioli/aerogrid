@@ -131,7 +131,6 @@ final class WindowDragSourceView: NSView {
             updateDestination(event)
             if let identity, let destination {
                 let placement = destination.update(at:event.locationInWindow)
-                model?.recordOrganizationDrag("drop window=\(identity.id) placement=\(placement.rawValue) group=\(destination.group.sorted())")
                 destination.drop?(identity,placement)
             }
             finish()

@@ -3,10 +3,27 @@ import GridCore
 
 final class AeroSpaceBackend: Backend, WindowManagerControl {
     var path: String
+    var diagnosticHistory: DiagnosticHistory?
+    var diagnosticOperation: UUID?
     init(path: String) { self.path = path }
     @discardableResult func run(_ arguments: [String]) throws -> String {
+        let history = diagnosticHistory
+        let command = history?.enabled == true ? BackendDiagnosticCommand(arguments) : nil
+        let start = ProcessInfo.processInfo.systemUptime
+        var outcome = "io"
+        defer {
+            if let history, let command {
+                let elapsed = Int((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+                if outcome != "ok" || command.mutates || elapsed >= 500 {
+                    let repeated = diagnosticOperation == nil || (command.readOnly && outcome != "ok")
+                    history.event("command", BackendDiagnosticResult(command: command.name, outcome: outcome, elapsedMs: elapsed),
+                                  operation: diagnosticOperation, repeating: repeated ? "command:\(command.name):\(outcome)" : nil)
+                }
+            }
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("aerogrid-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let outURL = directory.appendingPathComponent("out"), errURL = directory.appendingPathComponent("err")
         FileManager.default.createFile(atPath: outURL.path, contents: nil)
@@ -17,8 +34,10 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
         process.standardOutput = output; process.standardError = errors
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
-        try process.run()
+        do { try process.run() }
+        catch { outcome = "launch"; throw error }
         if finished.wait(timeout: .now() + 4) == .timedOut, process.isRunning {
+            outcome = "timeout"
             process.terminate()
             if finished.wait(timeout: .now() + 0.05) == .timedOut, process.isRunning {
                 kill(process.processIdentifier, SIGKILL)
@@ -28,15 +47,40 @@ final class AeroSpaceBackend: Backend, WindowManagerControl {
         }
         let text = String(decoding: try Data(contentsOf: outURL), as: UTF8.self)
         guard process.terminationStatus == 0 else {
+            outcome = "rejected"
             let error = String(decoding: try Data(contentsOf: errURL), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             if error.contains("Can't connect to AeroSpace server") {
+                outcome = "disconnected"
                 throw GridError.unavailable("El servicio de AeroGrid no responde. Intentando reconectar; si continúa, usá Recuperar.")
             }
+            outcome = BackendDiagnosticCommand.rejection(error)
             throw GridError.unavailable(error.isEmpty ? "AeroSpace command failed" : error)
         }
+        outcome = "ok"
         return text
     }
-    func desktop() throws -> Desktop { try JSONDecoder().decode(Desktop.self, from: Data(run(["grid-layout", "status"]).utf8)) }
+    func desktop() throws -> Desktop {
+        let history = diagnosticHistory
+        let includePlacement = history?.enabled == true
+        let decoder = JSONDecoder()
+        do {
+            let args = includePlacement ? ["grid-layout", "--data", "diagnostics", "status"] : ["grid-layout", "status"]
+            let data = Data(try run(args).utf8)
+            guard includePlacement, let history, history.enabled else { return try decoder.decode(Desktop.self, from: data) }
+            let status = try decoder.decode(DiagnosticBackendStatus.self, from: data)
+            let snapshot = DiagnosticSnapshot(desktop: status.desktop, placement: status.placement, aliases: history.aliases)
+            history.observe(.backend, snapshot, operation: diagnosticOperation)
+            return status.desktop
+        } catch {
+            if includePlacement, let history, history.enabled {
+                history.observe(.backend, .unavailableBackend, operation: diagnosticOperation)
+                if error is DecodingError {
+                    history.event("status-decode", ["outcome": "invalid"], operation: diagnosticOperation, repeating: "status-decode")
+                }
+            }
+            throw error
+        }
+    }
     func managementStatus() throws -> WindowManagerStatus {
         try JSONDecoder().decode(WindowManagerStatus.self,from:Data(run(["grid-layout","management-status"]).utf8))
     }

@@ -9,6 +9,7 @@ import AppKit
         init(_ window: Window) { id = window.windowId; pid = window.app.pid }
     }
     private var heldWorkspace: Workspace?
+    var diagnosticHeldWorkspace: String? { heldWorkspace?.name }
     private var inputAtClose: [UInt32] = []
     private var handledClosure: ClosedWindow?
     private let enabled: () -> Bool

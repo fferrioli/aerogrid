@@ -32,7 +32,7 @@ Avoid enabling another gesture provider for the same bindings at the same time. 
 
 ## High CPU while idle
 
-Update AeroGrid from its menu. The frontend avoids redundant UI publications, releases closed settings/organizer views, and runs gesture-release checks only while needed. Detailed packet logging is off by default; enable **Record detailed gesture packets** under **Settings → Import & diagnostics** only while reproducing a gesture problem. It turns off on restart. Ordinary diagnostic messages remain available.
+Update AeroGrid from its menu. The frontend avoids redundant UI publications, releases closed settings/organizer views, and runs gesture-release checks only while needed. Detailed packet logging is off by default and has its own files. Enable **Record detailed gesture packets** under **Settings → Import & diagnostics** while reproducing a gesture issue. It turns off on restart.
 
 If CPU remains high after updating, distinguish **AeroGrid** from **AeroGrid Backend** in Activity Monitor, note whether the organizer/settings are visible, and capture a short **Sample Process** report. Samples can contain local paths; review them before sharing. An isolated UI benchmark is available as `AeroGrid --benchmark-idle REPORT.json`; it uses fake windows/backend and does not measure your physical desktop or start gesture input.
 
@@ -46,7 +46,7 @@ On disconnect, normal gestures reach the adapted spaces without a modifier. Reco
 
 While the Mac is locked or the display is off, the map deliberately stays still: the status reads «En reposo · pantalla bloqueada» or «En reposo · pantalla apagada», and `--health` reports `reconciliationGate` as `locked`, `screens-asleep` or `settling` instead of `open`. A few seconds after unlocking, AeroGrid recovers once and resumes.
 
-A fullscreen card that briefly cannot be observed stays in place; a card is removed only after several consecutive observations, and a window that returns gets its previous position back. A card is not treated as leaving fullscreen while macOS still shows its window on a fullscreen Space; the log then shows `map: fullscreen-doubt kind=disagree`. To see what changed and why, look for `gate:` and `map:` lines (for example `map: fullscreen-doubt`, `map: fullscreen-removed reason=closed`, `map: fullscreen-restored`) in `~/Library/Application Support/AeroGrid/diagnostics.log`. They contain window numbers and reasons, not titles or app names.
+A fullscreen card that briefly cannot be observed stays in place. AeroGrid requires several consecutive observations before removing it, and a returning window can reclaim its previous position. In the local history, look for `gate` records and `reconciliation` events such as `fullscreen-doubt` with reason `disagree`, `fullscreen-removed` with reason `closed`, and `fullscreen-restored`.
 
 To check the protection without locking the Mac, the owned backend can hide one window from its Accessibility discovery for a bounded time. Take a fullscreen window `id` from `"$HOME/.local/bin/aerogrid-aerospace" grid-layout status`, then:
 
@@ -56,7 +56,7 @@ To check the protection without locking the Mac, the owned backend can hide one 
 
 The card should not move, and no other fullscreen card should change. With `"forget":true` the backend also drops its own retained record, reproducing the original failure: the log shows `fullscreen-doubt`, then `fullscreen-removed reason=closed`, and `fullscreen-restored` at the same place once the window is observable again: at expiry if its Space is the current one, otherwise when its Space is visited (Accessibility does not list a fullscreen window on another Space). If the backend registers the returning window in another workspace, `fullscreen-return` precedes the restore; no other card should change. Blindness lives only in memory, lasts 1–600 seconds, and `"seconds":0` cancels it. Unlike a real blackout, an expired blindness rediscovers the window by itself; a real background fullscreen window is rediscovered when its Space is visited.
 
-If every action fails with «La identidad de un bloque está ocupada por otro espacio» (versions before this fix), close the window that was just opened in the affected app; current versions log `map: fold-skipped reason=identity-taken` and leave that card unfolded instead.
+If every action fails with «La identidad de un bloque está ocupada por otro espacio» (versions before this fix), close the window that was just opened in the affected app. Current versions record `fold-skipped` with reason `identity-taken` and leave that card unfolded.
 
 If a card that was in fullscreen turned into an ordinary space while its window stayed in fullscreen (a version before this protection could do that), exit and re-enter fullscreen in that window once, then place its card again.
 
@@ -97,6 +97,20 @@ python3 scripts/uninstall.py
 
 The uninstaller removes owned apps and links, merges out owned configuration additions, and keeps state and backups. You can then reopen the original AeroSpace app if you used it previously.
 
+## Local window and Space history
+
+AeroGrid records recent local history by default. In **Settings → Import & diagnostics**, turn off **Record local window and Space diagnostics** to stop history and detailed packet recording immediately. The setting persists across app restarts. Existing files stay on disk and can be deleted after quitting AeroGrid. Turning history back on starts new checkpoints as observations become available. If needed, **Open local files** opens the support folder. The separate `--health` command still reports the last readiness state, pause and reconciliation gate, and the time that status changed.
+
+The history lives in `~/Library/Application Support/AeroGrid/diagnostics/history.jsonl` and `history.jsonl.previous`, with up to 8 MiB per file and owner-only access. The optional `gesture-packets.jsonl` and its `.previous` have a separate 16 MiB per-file budget. Older `diagnostics.log` and packet files in the parent directory may remain from earlier builds. AeroGrid sends no diagnostic data anywhere.
+
+- `map` records the controller's desired cells, board and display assignments, grid-unit rectangles, fullscreen targets, cursors, and anchors. A reserved cell can exist without a corresponding observed workspace. A gesture action records the intended destination anchors separately from backend observations.
+- `backend` records the backend's workspace membership, visible workspace, logical focus, WindowServer frames and reported native Space memberships. Join cell `workspace` and `fullscreenWindow` aliases to workspace and window rows. A workspace's `reportedEmpty` status means the backend reported no tracked windows or pending homes in that scope at that sample. `normalOccupancy` considers the backend's normal windows. A native Space with `unattributed` occupancy appeared in the macOS catalog without a matching tracked window. Its owner and physical occupancy are unknown, including on a fullscreen Space. Older or temporarily unavailable observations can omit frames, Space membership, or monitor attribution.
+- `action`, `command`, `reconciliation`, `gate`, and `health` describe the operation, controlled outcome, and observed transitions. Match operation IDs to see intermediate backend observations, including an unavailable sample or a visibility mismatch before rollback. An inventory blackout event can explain why the map keeps a card after a transient empty backend report.
+
+Each JSON line has a schema version, UTC timestamp, session ID, and sequence. For a `map` or `backend` stream, begin with a checkpoint, then apply deltas using `base` to match the previous sequence of that stream. A delta replaces the listed rows and deletes keys in `removed`. Unchanged polls produce no delta. The next observation after rotation or two minutes starts a new checkpoint.
+
+Window and display geometry is desktop metadata. Frames use Quartz's global display coordinates in points, with the main display's top-left as origin and positive y going down. Off-screen or parked frames can have negative or unexpected positions. Frame position alone does not establish native Space membership. Apps, windows, workspaces, displays, cells, and native Space IDs use aliases consistent within one frontend run, including across a backend restart. AeroGrid refreshes the aliases when the frontend restarts. Window titles, app names, contents, raw command arguments, and raw identifiers are excluded from this history.
+
 ## Share a useful report
 
-Include the macOS version, CPU architecture, display setup, exact steps, and whether the issue affects quick or held gestures. Review diagnostics before attaching them: local state and logs can contain app/window information. Never upload your entire Application Support folder.
+Include the macOS version, CPU architecture, display setup, exact steps, and whether the issue affects quick or held gestures. Review the relevant history excerpt before sharing it. Saved arrangements and older logs can contain app and window information. Attach only the files or lines relevant to the issue.

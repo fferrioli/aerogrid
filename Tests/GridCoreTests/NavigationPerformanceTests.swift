@@ -109,6 +109,32 @@ extension DynamicEngineTests {
         XCTAssertEqual(backend.screen.visible, before)
         XCTAssertEqual(engine.map.anchors, anchors)
     }
+    func testNavigationDetectsWrongVisibleWorkspaceAndRecordsRollbackTarget() throws {
+        let selection = try navigationSelection()
+        _ = engine.consumeDiagnosticEvents()
+        let target = try XCTUnwrap(engine.map.spaces.first { $0.id == selection.selected[ultra.id]?.spaceID })
+        backend.ignoreActivation = target.workspace
+        let before = backend.screen.visible
+        XCTAssertThrowsError(try engine.commitNavigation(selection))
+        XCTAssertEqual(backend.screen.visible, before)
+        let events = engine.consumeDiagnosticEvents()
+        let mismatch = try XCTUnwrap(events.first { $0.kind == .navigationMismatch })
+        XCTAssertEqual(mismatch.reason, "normal")
+        XCTAssertEqual(mismatch.display, ultra.id)
+        XCTAssertEqual(mismatch.space, target.id)
+        XCTAssertTrue(events.contains { $0.kind == .navigationRollback && $0.reason == "restored" })
+    }
+    func testAcknowledgedFocusWithDifferentObservedWindowProducesDiagnosticEvidence() throws {
+        _ = engine.consumeDiagnosticEvents()
+        backend.ignoresWindowFocus = true
+        let target = try XCTUnwrap(backend.screen.windows?.first { $0.id == 2 }?.identity)
+        let focused = backend.screen.focusedWindow
+        try engine.focusWindow(target)
+        XCTAssertEqual(engine.observed?.focusedWindow, focused)
+        let mismatch = try XCTUnwrap(engine.consumeDiagnosticEvents().first { $0.kind == .focusMismatch })
+        XCTAssertEqual(mismatch.reason, "window")
+        XCTAssertEqual(mismatch.window, target)
+    }
     func testNavigationSnapshotFailureDoesNotActivateDestination() throws {
         let selection = try navigationSelection()
         backend.failSnapshot = external.workspace

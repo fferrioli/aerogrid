@@ -6,6 +6,8 @@ final class MapBackend: Backend {
     var trees: [String: LayoutSnapshot] = [:]
     var failWindow: UInt32?
     var failActivation: String?
+    var ignoreActivation: String?
+    var ignoresWindowFocus = false
     var activations: [(String, UInt32?)] = []
     var calls: [String] = []
     var windowMoves: [UInt32] = []
@@ -25,12 +27,13 @@ final class MapBackend: Backend {
     func activateTarget(workspace: String, monitor: Int, window: UInt32?) throws {
         calls.append("activate:\(workspace)")
         if workspace == failActivation { throw GridError.unavailable("Injected activation failure") }
+        if workspace == ignoreActivation { return }
         activations.append((workspace, window)); screen.focusedMonitor = monitor
         if let window { screen.nativeVisible?[monitor] = window; screen.focusedWindow = window }
         else { screen.nativeVisible?.removeValue(forKey: monitor); screen.visible[monitor] = workspace; screen.focusedWindow = screen.windows?.first(where: { $0.workspace == workspace && !$0.nativeFullscreen })?.id }
     }
     func focus(monitor: Int, window: UInt32?) throws { screen.focusedMonitor = monitor; if let window { screen.focusedWindow = window } }
-    func focus(window: UInt32) throws { screen.focusedWindow = window }
+    func focus(window: UInt32) throws { if !ignoresWindowFocus { screen.focusedWindow = window } }
     func windows(workspace: String) throws -> [UInt32] { (screen.windows ?? []).filter { $0.workspace == workspace }.map(\.id) }
     func move(window: UInt32, workspace: String) throws {
         windowMoves.append(window)

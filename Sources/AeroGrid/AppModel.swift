@@ -22,10 +22,14 @@ final class AppModel: ObservableObject {
     private var backendLaunchPolicy = BackendLaunchPolicy()
     private var shuttingDown = false
     @Published var testingGestures = false { didSet { if testingGestures { input.reset() } } }
+    @Published private(set) var recordingLocalDiagnostics: Bool
     @Published var recordingGesturePackets = false {
         didSet {
             input.onPacket = nil
-            if recordingGesturePackets { input.onPacket = { [weak self] in self?.gesturePackets.json($0) } }
+            if recordingGesturePackets && recordingLocalDiagnostics {
+                gesturePackets.setEnabled(true)
+                input.onPacket = { [weak self] in self?.gesturePackets.json($0) }
+            } else if oldValue { gesturePackets.setEnabled(false, discardPending: !recordingLocalDiagnostics) }
         }
     }
     @Published var inputReady = false
@@ -43,7 +47,7 @@ final class AppModel: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var busy = false
     var hasPendingWork: Bool { busy || !pendingOperations.isEmpty }
-    private var pendingOperations: [(feedback: Bool, control: Bool, completion: ((Error?) -> Void)?, work: (DynamicEngine) throws -> Void)] = []
+    private var pendingOperations: [(action: DiagnosticAction, submittedAt: TimeInterval, feedback: Bool, control: Bool, completion: ((Error?) -> Void)?, work: (DynamicEngine) throws -> Void)] = []
     private var notifications: [NSObjectProtocol] = []
     private var hud: NSPanel?
     private var navigationPanels: [NSPanel] = []
@@ -60,8 +64,12 @@ final class AppModel: ObservableObject {
     var organizationMenuOpen = false
     @Published var gestureSelection: NavigationSelection?
     private var gestureScope: Scope?
-    private lazy var diagnostics = BufferedLog(url:directory.appendingPathComponent("diagnostics.log"))
-    private lazy var gesturePackets = BufferedLog(url:directory.appendingPathComponent("gesture-packets.jsonl"),limit:16_000_000)
+    var diagnosticsDirectory: URL { directory.appendingPathComponent(DiagnosticLogFile.directoryName, isDirectory: true) }
+    private let diagnostics: DiagnosticHistory
+    private let diagnosticsPreference = DiagnosticsPreference(defaults: .standard)
+    private lazy var gesturePackets = BufferedLog(url: diagnosticsDirectory.appendingPathComponent("gesture-packets.jsonl"), limit: 16 * 1024 * 1024)
+    private var lastHealth: HealthStatus?
+    private var healthFileCurrent = false
     private var committingGesture = false
     private var deferredContacts: [ContactGestureEvent] = []
     @Published var organizationWindowToMove: WindowIdentity?
@@ -72,12 +80,16 @@ final class AppModel: ObservableObject {
     init() throws {
         directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
         store = try Store(directory: directory)
+        let enabled = diagnosticsPreference.enabled
+        recordingLocalDiagnostics = enabled
+        diagnostics = DiagnosticHistory(directory: directory.appendingPathComponent(DiagnosticLogFile.directoryName, isDirectory: true), enabled: enabled)
         let defaultBackend = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/AeroGrid Backend.app/Contents/Resources/aerospace").path
         let config = try store.load(Configuration.self, name: "config.json") ?? Configuration(backendPath: defaultBackend)
         try config.validate()
         let saved = try store.load(RuntimeState.self, name: "state.json") ?? RuntimeState()
         configuration = config
         backend = AeroSpaceBackend(path: config.backendPath); management = backend
+        backend.diagnosticHistory = diagnostics
         paused = try store.load(WindowManagerPreferences.self,name:"control.json")?.paused ?? false
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend, store: store)
         input = GestureInput(configuration: config)
@@ -88,13 +100,15 @@ final class AppModel: ObservableObject {
             return !self.paused && !self.pauseChanging && !self.testingGestures && self.backendReady && !self.organizingDrag && !self.editingOrganization && !self.organizationMenuOpen
         }
         input.onDiagnostic = { [weak self] in self?.gestureMessage = $0 }
-        input.onTrace = { [weak self] in self?.log($0) }
+        input.onTapDisabled = { [weak self] in self?.diagnostics.event("input-tap", ["event": "disabled"], repeating: "input-tap-disabled") }
         input.onSwipe = { [weak self] swipe in self?.handle(swipe) }
         input.onContact = { [weak self] event in self?.handleContact(event) }
     }
     init(preview: Desktop, previewConfiguration: Configuration? = nil, previewMap: SpaceMap? = nil) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("aerogrid-preview-\(UUID().uuidString)")
         store = try Store(directory:directory)
+        recordingLocalDiagnostics = false
+        diagnostics = DiagnosticHistory(directory: directory, enabled: false)
         let config = previewConfiguration ?? Configuration(backendPath:"/usr/bin/false")
         configuration = config; backend = AeroSpaceBackend(path:config.backendPath)
         management = OrganizerSandboxManagement(); isPreview = true
@@ -114,16 +128,23 @@ final class AppModel: ObservableObject {
         state = engine.state; desktop = preview; backendReady = true; message = "Sandbox · no modifica el escritorio"
     }
     func start() {
+        var startup = ["event": "started"]
+        if let revision = Bundle.main.object(forInfoDictionaryKey: "AeroGridRevision") as? String, UpdateCandidate.validRevision(revision) {
+            startup["revision"] = revision
+        }
+        diagnostics.event("lifecycle", startup)
         launchBackend()
         if !AXIsProcessTrusted() {
             _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
         }
         inputReady = !paused && input.start()
+        writeHealth()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now(), repeating: 2)
         timer.setEventHandler { [weak self] in self?.refresh() }
         timer.resume(); self.timer = timer
         notifications.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.diagnostics.event("lifecycle", ["event": "display-parameters-changed"], repeating: "display-parameters-changed")
             self?.input.reset()
             self?.endDrag()
             self?.closeOverview?(true)
@@ -155,7 +176,25 @@ final class AppModel: ObservableObject {
             self?.externalAction(args)
         })
     }
-    func stop() { timer?.cancel(); input.stop(); deferredContacts.removeAll(); pendingOperations.removeAll(); diagnostics.flush(); gesturePackets.flush() }
+    func stop() {
+        timer?.cancel(); input.stop(); deferredContacts.removeAll(); pendingOperations.removeAll()
+        diagnostics.event("lifecycle", ["event": "stopped"])
+        diagnostics.flush()
+        if recordingGesturePackets { gesturePackets.flush() }
+    }
+    func setLocalDiagnostics(_ enabled: Bool) {
+        guard !isPreview, enabled != recordingLocalDiagnostics else { return }
+        diagnosticsPreference.setEnabled(enabled)
+        diagnostics.setEnabled(enabled)
+        recordingLocalDiagnostics = enabled
+        if !enabled { recordingGesturePackets = false }
+        if enabled {
+            diagnostics.event("lifecycle", ["event": "recording-enabled"])
+            lastHealth = nil
+            writeHealth()
+            refresh()
+        }
+    }
     func targetDisplay() -> String? {
         if configuration.targeting == .focused { return desktop?.displays.first { $0.monitor == desktop?.focusedMonitor }?.id }
         let point = NSEvent.mouseLocation
@@ -169,8 +208,32 @@ final class AppModel: ObservableObject {
         if let g = configuration.grids.first(where: { $0.cells.contains { $0.workspace == desktop.visible[display.monitor] } }) { return g }
         return configuration.grids.first { $0.id == state.activeGrids[display.id] } ?? configuration.grids.first { $0.displayRole == (display.builtin ? "builtin" : "external") }
     }
-    private func perform(feedback: Bool = true, coalesce: Bool = false, control: Bool = false, completion: ((Error?) -> Void)? = nil, _ work: @escaping (DynamicEngine) throws -> Void) {
+    private func perform(_ name: String, cells: [String] = [], display: String? = nil, window: WindowIdentity? = nil,
+                         direction: Direction? = nil, scope: Scope? = nil, destinations: [String: NavigationAnchor]? = nil,
+                         feedback: Bool = true, coalesce: Bool = false, control: Bool = false,
+                         completion: ((Error?) -> Void)? = nil, _ work: @escaping (DynamicEngine) throws -> Void) {
+        let aliases = diagnostics.aliases
+        var action = DiagnosticAction(name: name, outcome: "submitted")
+        if diagnostics.enabled {
+            action.cells = cells.isEmpty ? nil : cells.map { aliases.id("cell", $0) }
+            action.display = display.map { aliases.id("display", $0) }
+            action.window = window.map(aliases.window)
+            action.direction = direction?.rawValue
+            action.scope = scope?.rawValue
+            action.destinations = destinations.map { anchors in
+                Dictionary(uniqueKeysWithValues: anchors.map { display, anchor in
+                    (aliases.id("display", display), DiagnosticAction.Destination(cell: aliases.id("cell", anchor.spaceID),
+                        x: anchor.x, y: anchor.y, rect: anchor.frame))
+                })
+            }
+        }
+        perform(action, submittedAt: ProcessInfo.processInfo.systemUptime, feedback: feedback, coalesce: coalesce,
+                control: control, completion: completion, work)
+    }
+    private func perform(_ action: DiagnosticAction, submittedAt: TimeInterval, feedback: Bool, coalesce: Bool = false,
+                         control: Bool, completion: ((Error?) -> Void)?, _ work: @escaping (DynamicEngine) throws -> Void) {
         guard control || (!paused && !pauseChanging) else {
+            recordRejected(action, reason: "paused")
             completion?(GridError.unavailable("AeroGrid está en pausa")); return
         }
         if busy {
@@ -178,39 +241,47 @@ final class AppModel: ObservableObject {
             guard !coalesce else { return }
             guard control || pendingOperations.count < 8 else {
                 message = "Too many queued actions; wait for switching to finish"
-                log(message); writeHealth(); completion?(GridError.unavailable(message))
+                recordRejected(action, reason: "queueFull"); writeHealth(); completion?(GridError.unavailable(message))
                 return
             }
-            pendingOperations.append((feedback, control, completion, work))
+            pendingOperations.append((action, submittedAt, feedback, control, completion, work))
             return
         }
         busy = true
         queue.async {
+            let operation = self.diagnostics.enabled ? UUID() : nil
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            self.backend.diagnosticOperation = operation
             var error: Error?
             do { try work(self.engine) } catch let failure { error = failure }
-            let events = self.engine.consumeEvents()
+            self.backend.diagnosticOperation = nil
+            let events = self.engine.consumeDiagnosticEvents()
             let observed = self.engine.observed, state = self.engine.state
+            if let operation, self.diagnostics.enabled {
+                self.recordOperation(action, operation: operation, submittedAt: submittedAt, startedAt: startedAt,
+                                     error: error, events: events)
+            }
             let recoveryNotice = error == nil ? self.engine.consumeRecoveryNotice() : nil
             let hints = self.engine.navigationHints()
             DispatchQueue.main.async {
-                for event in events { self.log("map: \(event)") }
                 self.busy = false
                 if self.state != state { self.state = state }
                 if self.desktop != observed { self.desktop = observed }
                 if self.navigationHints != hints { self.navigationHints = hints }
                 if let selection = self.gestureSelection, let map = state.dynamicMap, let observed,
-                   (try? selection.validate(map:map,configuration:self.configuration,desktop:observed)) == nil { self.handleContact(.cancelled) }
+                   (try? selection.validate(map:map,configuration:self.configuration,desktop:observed)) == nil {
+                    self.diagnostics.event("gesture-navigation", ["event": "selection-stale"], repeating: "gesture-selection-stale")
+                    self.handleContact(.cancelled)
+                }
                 if let error {
                     if self.message != error.localizedDescription { self.message = error.localizedDescription }
                     if self.organizationError != self.message { self.organizationError = self.message }
                     if feedback && !self.overviewVisible { self.showHUD(self.message) }
-                    self.log(self.message)
                 } else {
                     if !self.backendReady { self.backendReady = true }
                     if (feedback || recoveryNotice != nil) && self.organizationError != nil { self.organizationError = nil }
                     let message = recoveryNotice ?? (self.paused ? "AeroGrid en pausa" : "Activo · \(observed?.displays.count ?? 0) pantalla(s)")
                     if self.message != message { self.message = message }
-                    if let recoveryNotice { self.log(recoveryNotice) }
                 }
                 if !self.gate.isOpen(at: ProcessInfo.processInfo.systemUptime), self.message != self.restMessage { self.message = self.restMessage }
                 self.writeHealth()
@@ -218,13 +289,36 @@ final class AppModel: ObservableObject {
                 while !self.pendingOperations.isEmpty {
                     let next = self.pendingOperations.removeFirst()
                     if (self.paused || self.pauseChanging) && !next.control {
+                        self.recordRejected(next.action, reason: "paused")
                         next.completion?(GridError.unavailable("AeroGrid está en pausa")); continue
                     }
-                    self.perform(feedback:next.feedback,control:next.control,completion:next.completion,next.work)
+                    self.perform(next.action, submittedAt: next.submittedAt, feedback: next.feedback,
+                                 control: next.control, completion: next.completion, next.work)
                     break
                 }
             }
         }
+    }
+    private func recordRejected(_ action: DiagnosticAction, reason: String) {
+        var action = action
+        action.outcome = reason
+        diagnostics.event("action", action)
+    }
+    private func recordOperation(_ action: DiagnosticAction, operation: UUID, submittedAt: TimeInterval,
+                                 startedAt: TimeInterval, error: Error?, events: [EngineDiagnosticEvent]) {
+        let history = diagnostics
+        var summary = action
+        summary.outcome = DiagnosticAction.outcome(error)
+        summary.queueMs = Int((startedAt - submittedAt) * 1_000)
+        summary.elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+        if action.name != "refresh" || error != nil || !events.isEmpty {
+            let repeated = action.name == "refresh" && error != nil ? "refresh:\(summary.outcome)" : nil
+            history.event("action", summary, operation: operation, repeating: repeated)
+        }
+        for event in events { history.event("reconciliation", DiagnosticReconciliation(event, aliases: history.aliases), operation: operation) }
+        let snapshot = DiagnosticSnapshot(map: engine.map, configuration: engine.configuration,
+            desktop: engine.observed, activeGrids: engine.state.activeGrids, aliases: history.aliases)
+        history.observe(.map, snapshot, operation: operation)
     }
     func refresh() {
         guard !shuttingDown else { return }
@@ -232,7 +326,7 @@ final class AppModel: ObservableObject {
         if reconciliationDecision(open: gate.isOpen(at: ProcessInfo.processInfo.systemUptime), reopened: reopened) == .recover { recover(); return }
         guard !pauseChanging, Date() >= topologySettlesAt else { return }
         if isPreview {
-            perform(feedback:false,coalesce:true) { try $0.refresh() }
+            perform("refresh", feedback:false,coalesce:true) { try $0.refresh() }
             return
         }
         launchBackend()
@@ -253,7 +347,7 @@ final class AppModel: ObservableObject {
         }
         guard gestureSelection == nil, !organizingDrag, !editingOrganization, !organizationMenuOpen else { return }
         let desiredPause = paused, syncManagement = managementNeedsSync || paused
-        perform(feedback:false,coalesce:true,control:true) { engine in
+        perform("refresh", feedback:false,coalesce:true,control:true) { engine in
             do {
                 if syncManagement { try WindowManagerSession.setPaused(desiredPause,backend:self.management) }
                 if !desiredPause && self.reconciliationOpen.value { try engine.refresh() }
@@ -269,12 +363,12 @@ final class AppModel: ObservableObject {
     }
     func navigate(_ direction: Direction, scope: Scope, displayID: String? = nil) {
         let id = displayID ?? targetDisplay()
-        perform { try $0.navigate(direction, scope: scope, displayID: id) }
+        perform("navigate", display: id, direction: direction, scope: scope) { try $0.navigate(direction, scope: scope, displayID: id) }
     }
     func jump(gridID: String, cellID: String, displayID: String?) {
         let move = moveMode
         let window = overviewWindowID
-        perform { engine in
+        perform(move ? "moveFocusedWindow" : "jump", cells: [cellID], display: displayID) { engine in
             if move {
                 guard let window else { throw GridError.unavailable("Focus an application window, then open the grid overview") }
                 try engine.moveFocusedWindow(gridID: gridID, cellID: cellID, windowOverride: window)
@@ -293,13 +387,13 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func selectGrid(offset: Int, displayID: String? = nil) { let id = displayID ?? targetDisplay(); perform { try $0.selectGrid(offset: offset, displayID: id) } }
-    func cycleWindow(offset: Int, displayID: String? = nil) { let id = displayID ?? targetDisplay(); perform { try $0.cycleWindow(offset: offset, displayID: id); try $0.refresh() } }
-    func saveProfile() { let id = targetDisplay(); perform { try $0.saveProfile(displayID: id) } }
+    func selectGrid(offset: Int, displayID: String? = nil) { let id = displayID ?? targetDisplay(); perform("selectGrid", display: id) { try $0.selectGrid(offset: offset, displayID: id) } }
+    func cycleWindow(offset: Int, displayID: String? = nil) { let id = displayID ?? targetDisplay(); perform("cycleWindow", display: id) { try $0.cycleWindow(offset: offset, displayID: id); try $0.refresh() } }
+    func saveProfile() { let id = targetDisplay(); perform("saveProfile", display: id) { try $0.saveProfile(displayID: id) } }
     func apply(_ config: Configuration) {
         guard !pauseChanging else { return }
         let shouldRefresh = !paused
-        perform(feedback:false,control:true) { engine in
+        perform("applyConfiguration", feedback:false,control:true) { engine in
             try engine.updateConfiguration(config)
             self.backend.path = config.backendPath
             DispatchQueue.main.async { self.configuration = config; self.input.configuration = config }
@@ -323,8 +417,7 @@ final class AppModel: ObservableObject {
         let wasOpen = gate.isOpen(at: now)
         let reopened = gate.update(locked: locked || sessionInactive, screensAsleep: screensAsleep, at: now)
         reconciliationOpen.value = gate.isOpen(at: now)
-        if let reason = gate.reason, previous != reason { log("gate: closed reason=\(reason)") }
-        if reopened { log("gate: open") }
+        if previous != gate.reason || reopened { diagnostics.event("gate", ["state": gate.reason ?? "open"]) }
         if wasOpen && !gate.isOpen(at: now) {
             // Like a topology change: no gesture, drag or organizer survives into a locked or dark session.
             input.reset(); handleContact(.cancelled); deferredContacts.removeAll()
@@ -333,6 +426,7 @@ final class AppModel: ObservableObject {
         return reopened
     }
     func recover() {
+        diagnostics.event("lifecycle", ["event": "recover-requested"], repeating: "recover-requested")
         managementNeedsSync = true
         guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else {
             return
@@ -342,7 +436,7 @@ final class AppModel: ObservableObject {
     func setPaused(_ value:Bool) {
         guard value != paused, !pauseChanging else { return }
         pauseChanging = true; input.stop(); inputReady = false; deferredContacts.removeAll(); closeOverview?(false); endDrag()
-        perform(control:true,completion:{ [weak self] error in
+        perform(value ? "pause" : "resume", control:true,completion:{ [weak self] error in
             guard let self else { return }
             self.pauseChanging = false
             if error == nil {
@@ -359,6 +453,7 @@ final class AppModel: ObservableObject {
         }
     }
     func prepareToQuit(_ completion:@escaping () -> Void) {
+        diagnostics.event("lifecycle", ["event": "stopping"])
         shuttingDown = true
         pauseChanging = true; input.stop(); deferredContacts.removeAll(); pendingOperations.removeAll(); closeOverview?(false)
         queue.async {
@@ -383,6 +478,7 @@ final class AppModel: ObservableObject {
         guard !isPreview, !shuttingDown, ownsBackend else { return }
         let running = !NSRunningApplication.runningApplications(withBundleIdentifier:"local.AeroGrid.Backend").isEmpty
         guard backendLaunchPolicy.request(at:ProcessInfo.processInfo.systemUptime,running:running) else { return }
+        diagnostics.event("lifecycle", ["event": "backend-launch-requested"])
         managementNeedsSync = true; backendReady = false
         message = "Iniciando el servicio de AeroGrid…"
         let options = NSWorkspace.OpenConfiguration(); options.activates = false
@@ -391,9 +487,9 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if self.shuttingDown { application?.terminate(); return }
-                guard let error else { return }
+                self.diagnostics.event("lifecycle", ["event": error == nil ? "backend-launched" : "backend-launch-failed"])
+                guard error != nil else { return }
                 self.message = "No se pudo iniciar el servicio de AeroGrid. Usá Recuperar."
-                self.log("Backend launch failed: \(error.localizedDescription)")
                 self.writeHealth()
             }
         }
@@ -444,43 +540,40 @@ final class AppModel: ObservableObject {
                 if let end = deferredContacts.lastIndex(where: { if case .ended = $0 { return true }; return false }) {
                     deferredContacts = Array(deferredContacts.prefix(through:end))
                 } else { deferredContacts.removeAll() }
-                log("Contact cancelled during commit; preserved complete queued gestures")
+                diagnostics.event("gesture-navigation", ["event": "cancelled-during-commit"], repeating: "gesture-cancelled-during-commit")
             }
             else if deferredContacts.count < 64 { deferredContacts.append(event) }
-            else { deferredContacts.removeAll(); message = "Esperá a que termine el cambio antes de continuar" }
+            else {
+                deferredContacts.removeAll(); message = "Esperá a que termine el cambio antes de continuar"
+                diagnostics.event("gesture-navigation", ["event": "contact-queue-full"], repeating: "gesture-contact-queue-full")
+            }
             return
         }
         switch event {
         case .cancelled:
-            log("Contact cancelled: pending=\(gestureSelection != nil)")
-            if gestureSelection != nil { gestureSelection = nil }
+            if gestureSelection != nil {
+                diagnostics.event("gesture-navigation", ["event": "selection-cancelled"], repeating: "gesture-selection-cancelled")
+                gestureSelection = nil
+            }
             gestureScope = nil; closeNavigationHUD()
         case .ended:
-            log("Contact ended: pending=\(gestureSelection != nil)")
             guard let selection = gestureSelection else { return }
+            let scope = gestureScope
             gestureSelection = nil; gestureScope = nil; closeNavigationHUD()
             guard !paused, !pauseChanging, !testingGestures, !selection.isAtOrigin, pendingOperations.count < 8 else { return }
             committingGesture = true
-            log("Navigation commit: \(selection.selected.mapValues(\.spaceID))")
             closeOverview?(false)
-            let submittedAt = ProcessInfo.processInfo.systemUptime
-            perform(feedback:true,completion: { [weak self] error in
+            perform("gestureNavigate", display: selection.originDisplayID, scope: scope, destinations: selection.selected,
+                    completion: { [weak self] error in
                 guard let self else { return }
                 self.committingGesture = false
-                let elapsed = (ProcessInfo.processInfo.systemUptime - submittedAt) * 1000
-                self.log(String(format: "Navigation total: %.1f ms", elapsed))
-                self.log(error.map { "Navigation failed: \($0.localizedDescription)" } ?? "Navigation committed")
                 let waiting = self.deferredContacts; self.deferredContacts.removeAll()
                 // Resolve each following gesture against the desktop that actually committed.
                 if error == nil { for event in waiting { self.handleContact(event) } }
             }) { engine in
-                let startedAt = ProcessInfo.processInfo.systemUptime
-                self.log(String(format: "Navigation queue: %.1f ms", (startedAt - submittedAt) * 1000))
-                defer { self.log(String(format: "Navigation work: %.1f ms", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)) }
                 try engine.commitNavigation(selection)
             }
         case .step(let swipe):
-            log("Contact step: \(swipe.fingers) \(swipe.direction.rawValue)")
             guard !paused, !pauseChanging, !testingGestures, backendReady, !committingGesture, !organizingDrag, !editingOrganization, !organizationMenuOpen,
                   let binding = configuration.bindings.first(where: { $0.fingers == swipe.fingers && $0.modifiers == swipe.modifiers && $0.direction == swipe.direction }),
                   binding.action == "navigate", let desktop, let map = state.dynamicMap else { return }
@@ -490,10 +583,16 @@ final class AppModel: ObservableObject {
                 try selection.validate(map:map,configuration:configuration,desktop:desktop)
                 gestureScope = binding.scope
                 let moved = selection.step(swipe.direction)
+                if !moved && selection.isAtOrigin {
+                    diagnostics.event("gesture-navigation", ["event": "boundary", "direction": swipe.direction.rawValue], repeating: "gesture-boundary")
+                }
                 gestureSelection = selection
                 gestureMessage = moved ? "Selección pendiente · soltá para abrir" : "Borde del mapa · soltá o volvé al origen"
                 scheduleNavigationHUD()
-            } catch { handleContact(.cancelled); message = error.localizedDescription }
+            } catch {
+                diagnostics.event("gesture-navigation", ["event": "selection-failed", "outcome": DiagnosticAction.outcome(error)], repeating: "gesture-selection-failed")
+                handleContact(.cancelled); message = error.localizedDescription
+            }
         }
     }
     private func externalAction(_ args: [String]) {
@@ -521,7 +620,6 @@ final class AppModel: ObservableObject {
         }
     }
     var spaces: [Space] { state.dynamicMap?.spaces ?? [] }
-    func recordOrganizationDrag(_ message: String) { log("Organizer: \(message)") }
     func currentSpace(on display: Display) -> Space? {
         if let native = desktop?.nativeVisible?[display.monitor] { return spaces.first { $0.nativeWindow?.id == native } }
         return spaces.first { $0.workspace == desktop?.visible[display.monitor] && $0.nativeWindow == nil }
@@ -531,15 +629,15 @@ final class AppModel: ObservableObject {
         return (desktop?.windows ?? []).filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
     }
     func openSpace(_ id: String, displayID: String?) {
-        perform { engine in
+        perform("openSpace", cells: [id], display: displayID) { engine in
             try engine.jump(cellID: id, displayID: displayID)
             DispatchQueue.main.async { self.closeOverview?(false) }
         }
     }
-    func removeEmptySpace(_ id: String) { perform { try $0.removeEmptySpace(id) } }
-    func renameSpace(_ id: String, name: String) { perform { try $0.renameSpace(id, name: name) } }
+    func removeEmptySpace(_ id: String) { perform("removeEmptySpace", cells: [id]) { try $0.removeEmptySpace(id) } }
+    func renameSpace(_ id: String, name: String) { perform("renameSpace", cells: [id]) { try $0.renameSpace(id, name: name) } }
     func prepareMerge(_ id: String, into target: String) {
-        perform(feedback: false) { engine in
+        perform("prepareMerge", cells: [id, target], feedback: false) { engine in
             let preview = try engine.makeMergePreview(id, into: target)
             DispatchQueue.main.async {
                 var named = preview
@@ -550,42 +648,41 @@ final class AppModel: ObservableObject {
         }
     }
     func mergeSpaces(_ preview: MergePreview) {
-        perform { try $0.mergeSpaces(preview.sourceID, into: preview.targetID,
+        perform("mergeSpaces", cells: [preview.sourceID, preview.targetID]) { try $0.mergeSpaces(preview.sourceID, into: preview.targetID,
                                     expectedSource: Set(preview.sourceWindows.map(\.identity)), expectedTarget: Set(preview.targetWindows.map(\.identity))) }
         mergePreview = nil
     }
-    func moveSpace(_ id: String, to target: String) { perform { try $0.moveSpace(id, to: target) } }
-    func insertSpace(_ id: String, beside target: String, edge: Direction) { perform { try $0.insertSpace(id,beside:target,edge:edge) } }
-    func moveWindow(_ window: WindowIdentity, to target: String) { perform { try $0.moveWindow(window, to: target) } }
+    func moveSpace(_ id: String, to target: String) { perform("moveSpace", cells: [id, target]) { try $0.moveSpace(id, to: target) } }
+    func insertSpace(_ id: String, beside target: String, edge: Direction) { perform("insertSpace", cells: [id, target], direction: edge) { try $0.insertSpace(id,beside:target,edge:edge) } }
+    func moveWindow(_ window: WindowIdentity, to target: String) { perform("moveWindow", cells: [target], window: window) { try $0.moveWindow(window, to: target) } }
     func dropWindow(_ window: WindowIdentity, to target: String, layout: String, orientation: String) {
-        perform { try $0.moveWindow(window, to: target, layout: layout, orientation: orientation) }
+        perform("dropWindow", cells: [target], window: window) { try $0.moveWindow(window, to: target, layout: layout, orientation: orientation) }
     }
     func reorderWindow(_ window: WindowIdentity, before target: WindowIdentity) {
-        recordOrganizationDrag("reorder \(window.id) before \(target.id)")
-        perform { try $0.reorderWindow(window, before: target) }
+        perform("reorderWindow", window: window) { try $0.reorderWindow(window, before: target) }
     }
-    func arrange(_ id: String, layout: String, orientation: String) { perform { try $0.arrange(id, layout: layout, orientation: orientation) } }
-    func assignSpace(_ id: String, displayID: String) { perform { try $0.assignSpace(id, displayID: displayID) } }
-    func reunite(_ source: String) { perform { try $0.reunite(sourceID: source) } }
+    func arrange(_ id: String, layout: String, orientation: String) { perform("arrange", cells: [id]) { try $0.arrange(id, layout: layout, orientation: orientation) } }
+    func assignSpace(_ id: String, displayID: String) { perform("assignSpace", cells: [id], display: displayID) { try $0.assignSpace(id, displayID: displayID) } }
+    func reunite(_ source: String) { perform("reunite", cells: [source]) { try $0.reunite(sourceID: source) } }
     func prepareReunite(_ source: String) {
-        perform(feedback: false) { engine in
+        perform("prepareReunite", cells: [source], feedback: false) { engine in
             let preview = try engine.makeReunitePreview(sourceID: source)
             DispatchQueue.main.async { self.reunitePreview = preview }
         }
     }
     func reunite(_ preview: ReunitePreview) {
-        perform { try $0.reunite(sourceID: preview.sourceID, expectedOwners: Set(preview.windows.map(\.identity))) }
+        perform("reunite", cells: [preview.sourceID]) { try $0.reunite(sourceID: preview.sourceID, expectedOwners: Set(preview.windows.map(\.identity))) }
         reunitePreview = nil
     }
-    func undoOrganization() { perform { try $0.undo() } }
+    func undoOrganization() { perform("undo") { try $0.undo() } }
     func createSpace(near: String? = nil, moving: WindowIdentity? = nil, displayID: String? = nil) {
         let display = displayID ?? targetDisplay()
-        perform { engine in
+        perform("createSpace", cells: near.map { [$0] } ?? [], display: display, window: moving) { engine in
             _ = try engine.createSpace(nearID: near, displayID: display, moving: moving)
         }
     }
     func createSpaceAt(row: Int, column: Int, moving: WindowIdentity? = nil, displayID: String?) {
-        perform { _ = try $0.createSpace(nearID:nil,displayID:displayID,row:row,column:column,moving:moving) }
+        perform("createSpaceAt", display: displayID, window: moving) { _ = try $0.createSpace(nearID:nil,displayID:displayID,row:row,column:column,moving:moving) }
     }
     var projectedSpaces: [Space] { state.dynamicMap?.projectedSpaces(combined:desktop?.displays.count == 1) ?? [] }
     func boardSpaces(_ display: Display) -> [Space] {
@@ -604,16 +701,15 @@ final class AppModel: ObservableObject {
             ?? LayoutSnapshot(boot:windows.first?.boot ?? "",tree:.root([]))
         return saved.presenting(windows:windows)
     }
-    func setSpaceRect(_ id: String, _ rect: SpaceRect, displayID:String? = nil) { perform { try $0.setSpaceRect(id,rect:rect,displayID:displayID) } }
+    func setSpaceRect(_ id: String, _ rect: SpaceRect, displayID:String? = nil) { perform("setSpaceRect", cells: [id], display: displayID) { try $0.setSpaceRect(id,rect:rect,displayID:displayID) } }
     func beginDrag(window: WindowIdentity? = nil, space: String? = nil) {
-        log("Organization drag: window=\(window?.id ?? 0) space=\(space ?? "")")
         organizingDrag = true; draggedWindow = window; draggedSpace = space
     }
     func endDrag() { organizingDrag = false; draggedWindow = nil; draggedSpace = nil }
     func placeWindow(_ identity: WindowIdentity,in space: String,group: Set<UInt32>,placement: GridCore.WindowPlacement) {
         guard let target = spaces.first(where: { $0.id == space }), let source = desktop?.windows?.first(where: { $0.identity == identity }) else { return }
         let expected = layout(target).tree
-        perform { try $0.placeWindow(identity,in:space,group:group,placement:placement,expectedTarget:expected,expectedSourceWorkspace:source.workspace) }
+        perform("placeWindow", cells: [space], window: identity) { try $0.placeWindow(identity,in:space,group:group,placement:placement,expectedTarget:expected,expectedSourceWorkspace:source.workspace) }
     }
     func placementPreview(_ identity: WindowIdentity,in space: String,group: Set<UInt32>,placement: GridCore.WindowPlacement) -> LayoutSnapshot? {
         guard let source = spaces.first(where: { windows(in:$0).contains(where: { $0.identity == identity }) }), let target = spaces.first(where: { $0.id == space }) else { return nil }
@@ -625,14 +721,14 @@ final class AppModel: ObservableObject {
         return try? layout(target).placing(incoming,beside:group,placement:placement)
     }
     func moveSpaceToVacancy(_ id: String) {
-        perform { engine in
+        perform("moveSpaceToVacancy", cells: [id]) { engine in
             guard let anchor = engine.map.spaces.first(where: { $0.id == id }) else { throw GridError.stale }
             let position = engine.map.vacant(near: anchor)
             try engine.moveSpace(id, row: position.row, column: position.column)
         }
     }
-    func moveSpaceAt(_ id: String, row: Int, column: Int) { perform { try $0.moveSpace(id, row: row, column: column) } }
-    func focusWindow(_ identity: WindowIdentity) { perform { try $0.focusWindow(identity) } }
+    func moveSpaceAt(_ id: String, row: Int, column: Int) { perform("moveSpaceAt", cells: [id]) { try $0.moveSpace(id, row: row, column: column) } }
+    func focusWindow(_ identity: WindowIdentity) { perform("focusWindow", window: identity) { try $0.focusWindow(identity) } }
     func restoreOverviewFocus() {
         guard let id = overviewWindowID, let window = desktop?.windows?.first(where: { $0.id == id }) else { return }
         focusWindow(window.identity)
@@ -684,18 +780,40 @@ final class AppModel: ObservableObject {
         panel.orderFrontRegardless(); hud = panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak panel] in panel?.close() }
     }
-    private func log(_ text: String) { diagnostics.text(text) }
     private func writeHealth() {
-        let health: [String: Any] = ["backendReady": backendReady, "gestureInputReady": inputReady,
-                                   "accessibilityGranted": AXIsProcessTrusted(), "paused": paused, "pauseChanging": pauseChanging,
-                                   "managementEnabled": backendReady && !pauseChanging ? !paused as Any : NSNull(),
-                                   "message": message, "gesture": gestureMessage,
-                                   "reconciliationGate": gate.reason ?? "open",
-                                   "updatedAt": ISO8601DateFormatter().string(from: Date())]
-        if let data = try? JSONSerialization.data(withJSONObject: health, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: directory.appendingPathComponent("health.json"), options: .atomic)
+        guard !isPreview else { return }
+        let health = HealthStatus(backendReady: backendReady, gestureInputReady: inputReady,
+            accessibilityGranted: AXIsProcessTrusted(), paused: paused, pauseChanging: pauseChanging,
+            managementEnabled: backendReady && !pauseChanging ? !paused : nil,
+            reconciliationGate: gate.reason ?? "open")
+        if health != lastHealth {
+            lastHealth = health
+            healthFileCurrent = false
+            diagnostics.event("health", health)
+        }
+        guard !healthFileCurrent else { return }
+        var status = health
+        status.updatedAt = ISO8601DateFormatter().string(from: .now)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            try encoder.encode(status).write(to: directory.appendingPathComponent("health.json"), options: .atomic)
+            healthFileCurrent = true
+        } catch {
+            diagnostics.event("health-write", ["outcome": "failed"], repeating: "health-write-failed")
         }
     }
+}
+
+private struct HealthStatus: Encodable, Equatable {
+    let backendReady: Bool
+    let gestureInputReady: Bool
+    let accessibilityGranted: Bool
+    let paused: Bool
+    let pauseChanging: Bool
+    let managementEnabled: Bool?
+    let reconciliationGate: String
+    var updatedAt: String?
 }
 
 enum ReconciliationDecision { case wait, refresh, recover }
