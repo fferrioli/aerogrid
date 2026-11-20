@@ -283,9 +283,19 @@ def fixture_session(choose_display, *, allow_backend_restart=False):
         print(f"Private fixture output: {session.directory}", flush=True)
         try:
             active.symlink_to(session.directory.name)
-            (session.directory / "handoff-request").touch()
-            if not command("--fixture-handoff", executable=CONTROLLER).isdigit():
-                raise RuntimeError("The installed controller does not support fixture isolation")
+            request = session.directory / "handoff-request"
+            request.touch()
+            started = session.directory / "handoff-started"
+
+            def handoff_started():
+                if started.exists():
+                    return True
+                # A new controller may have registered before AppModel is ready to quit.
+                if not command("--fixture-handoff", executable=CONTROLLER).isdigit():
+                    raise RuntimeError("The installed controller does not support fixture isolation")
+                return started.exists()
+
+            wait_for(handoff_started, "the ordinary controller to accept fixture handoff")
             ready = session.directory / "handoff-ready"
             wait_for(lambda: ready.exists() and try_lock(fd), "the ordinary controller to quit and release the backend")
             observation = status()

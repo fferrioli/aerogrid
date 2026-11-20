@@ -80,7 +80,7 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 
 | Tarea | Rol | Estado | PR | Fecha |
 |---|---|---|---|---|
-| F0-1 Registro pasivo del caso real (no bloquea) | SUB-impl + HUM | hecho (sonda); registro pendiente | | 2026-11-12 |
+| F0-1 Registro pasivo del caso real | SUB-impl + HUM | hecho, verificado tras casi nueve horas de bloqueo | [#7](https://github.com/fferrioli/aerogrid/pull/7) | 2026-11-20 |
 | F0-2 Compuerta de reconciliación | SUB-impl | hecho | | 2026-11-12 |
 | F0-3 Reconciliación fullscreen con confianza | SUB-impl | hecho | | 2026-11-12 |
 | F0-4 Conectar compuerta y registro en la app | SUB-impl | hecho | | 2026-11-12 |
@@ -111,7 +111,8 @@ Actualizar al cerrar cada tarea: estado (`pendiente`, `en curso`, `hecho`, `bloq
 | F1-2 Setups con nombre: diseño | ORQ | hecho | | 2026-11-13 |
 | F1-2a Setups: guardar y aplicar | SUB-impl | hecho (simulado) | | 2026-11-13 |
 | F1-2b Vistas de setups | ORQ | hecho (simulado) | | 2026-11-13 |
-| F1-1/F1-2 Instalación y aceptación física (reinicio real) | ORQ + HUM | pendiente (lunes) | | |
+| F1-1/F1-2 Instalación y aceptación física | ORQ + HUM | instalado; setup y Deshacer verificados con ventanas descartables; reinicio real pendiente | [#6](https://github.com/fferrioli/aerogrid/pull/6) | 2026-11-20 |
+| F1-6 Aislar las verificaciones en vivo | SUB-impl + ORQ | smokes y recuperación tras interrupción verificados en una pantalla | [#6](https://github.com/fferrioli/aerogrid/pull/6) | 2026-11-20 |
 | F1-3 … F1-7 | ver fase 1 | pendiente | | |
 | F2-1 … F2-4 | ver fase 2 | pendiente | | |
 | F3-1 … F3-5 | ver fase 3 | pendiente | | |

@@ -102,6 +102,19 @@ class FixtureIsolationTests(unittest.TestCase):
         self.restore.assert_called_once()
         self.launch.assert_called_once()
 
+    def test_handoff_retries_before_controller_is_ready(self):
+        def handoff_after_startup(mode, **kwargs):
+            if command.call_count == 1:
+                return "123"
+            return self.handoff(mode, **kwargs)
+
+        with patch.object(live, "command", side_effect=handoff_after_startup) as command:
+            with patch.object(live, "activate"), patch.object(live.time, "sleep"):
+                with live.fixture_session(self.choose_display):
+                    self.assertEqual(command.call_count, 2)
+        self.restore.assert_called_once()
+        self.launch.assert_called_once()
+
     def test_occupied_fixture_workspace_keeps_production_blocked_after_restore(self):
         with patch.object(live, "activate"):
             with self.assertRaisesRegex(RuntimeError, "A window remains in a fixture workspace"):
