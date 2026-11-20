@@ -45,6 +45,10 @@ Automatic discoveries and generated fullscreen/split destinations use a nearby f
 
 Organization changes are serialized and validate window ownership using process and boot identity. A pending transaction records rollback state so interrupted changes can recover before accepting new work. Undo checks for later incompatible edits and does not recreate closed windows.
 
+Durable places use per-space layout templates with bundle IDs and window ordinals. Closing windows retains their slots. The controller can restore places during the first five minutes after console login or through **Restaurar lugares**. Backend rules that assign workspaces take precedence. Automatic login restoration can enter native fullscreen. Manual restoration and setup application limit changes to windowed arrangements so Undo can restore them.
+
+Named setups save map geometry and place templates in `setups.json`. Applying a setup records one organization transaction and reports missing apps. The controller emits structured placement and setup outcomes using local diagnostic aliases. Completed setup events are written after the transaction commits.
+
 Background refresh publishes desktop, map, hints and readiness only when their values change. Semantically identical layout snapshots keep their existing bytes, avoiding invalidations caused solely by JSON key order. Closed settings/organizer windows release their hosting views; settings construct only the active section rather than retaining all tabs in a native toolbar-backed TabView.
 
 On disconnect, parallel layout groups become neighboring destinations; stacked subtrees remain intact. Family records preserve the original nested arrangement and proportions. Reconnection can recompose unchanged families without overwriting arrangements the user edited.

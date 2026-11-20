@@ -12,6 +12,7 @@ public protocol Backend: AnyObject {
     func focus(window: UInt32) throws
     func move(window: UInt32, workspace: String) throws
     func moveVerified(window: WindowIdentity, workspace: String) throws
+    func enterFullscreen(window: WindowIdentity) throws
     func moveFullscreen(window: WindowIdentity, workspace: String) throws
     func snapshot(workspace: String) throws -> String
     func restore(workspace: String, snapshot: String) throws
@@ -20,6 +21,7 @@ public protocol Backend: AnyObject {
     func activateTarget(workspace: String, monitor: Int, window: UInt32?) throws
 }
 public extension Backend {
+    func enterFullscreen(window: WindowIdentity) throws {}
     func moveVerified(window: WindowIdentity, workspace: String) throws { try move(window: window.id, workspace: workspace) }
     func moveFullscreen(window: WindowIdentity, workspace: String) throws { try move(window: window.id, workspace: workspace) }
     func validateTarget(workspace: String, monitor: Int, window: UInt32?) throws { try validate(workspace: workspace, monitor: monitor) }

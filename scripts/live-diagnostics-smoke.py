@@ -1,36 +1,18 @@
 #!/usr/bin/env python3
-"""Opt-in verification against the running installation, with disposable GridFixture windows."""
+"""Verify installed diagnostic paths against the live backend in an isolated fixture session."""
 import argparse
 import json
-from pathlib import Path
 import stat
-import subprocess
-import time
 
-HOME = Path.home()
-CLI = HOME / ".local/bin/aerogrid-aerospace"
-APP = HOME / ".local/bin/aerogrid"
-HISTORY = HOME / "Library/Application Support/AeroGrid/diagnostics/history.jsonl"
-FIXTURE = Path(__file__).resolve().parents[1] / "dist/GridFixture"
+from live_fixture_session import activate, command, fixture_session, native_by_monitor, status, wait_for, write_json
 
 
-def command(executable, *args):
-    result = subprocess.run([str(executable), *map(str, args)], capture_output=True, text=True, timeout=8)
-    if result.returncode:
-        raise RuntimeError(f"Installed command failed ({args[0]}, status {result.returncode})")
-    return result.stdout
-
-
-def status():
-    return json.loads(command(CLI, "grid-layout", "--data", "diagnostics", "status"))
-
-
-def history():
+def history(path):
     """Rebuild backend and map tables from retained checkpoints and deltas."""
     states, rows = {}, []
-    for path in (HISTORY.with_suffix(".jsonl.previous"), HISTORY):
+    for source in (path.with_suffix(".jsonl.previous"), path):
         try:
-            lines = path.read_text().splitlines()
+            lines = source.read_text().splitlines()
         except FileNotFoundError:
             continue
         for line in lines:
@@ -62,77 +44,57 @@ def history():
     return session, states.get((session, "backend"), (None, {}))[1], states.get((session, "map"), (None, {}))[1], rows
 
 
-def wait_for(check, description, seconds=16):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        value = check()
-        if value:
-            return value
-        time.sleep(0.5)
-    raise RuntimeError(f"Timed out waiting for {description}")
-
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prepare-seconds", type=int, default=8, help="Time to select the empty test cell")
-    args = parser.parse_args()
-    if not FIXTURE.is_file():
-        raise RuntimeError("Build dist/GridFixture first (see CONTRIBUTING.md)")
-    health = json.loads(command(APP, "--health"))
-    if not health.get("backendReady") or health.get("paused") or health.get("reconciliationGate") != "open":
-        raise RuntimeError("Start or recover the installed app and leave reconciliation open")
-    print("Select an existing empty AeroGrid cell on a normal desktop. Leave the organizer closed.", flush=True)
-    time.sleep(max(0, args.prepare_seconds))
-    original = status()
-    monitor = original["focusedMonitor"]
-    workspace = original["visible"][str(monitor)]
-    native = original.get("placementDiagnostics", {}).get("nativeDisplays", [])
-    if original.get("extensionVersion", 0) < 3 or not native:
-        raise RuntimeError("Matching backend v3 and native Spaces observations are required")
-    normal = any(display.get("monitor") == monitor and
-                 any(space["id"] == display["current"] and space["type"] == 0 for space in display["spaces"])
-                 for display in native)
-    if not normal or str(monitor) in original.get("nativeVisible", {}) or any(w["workspace"] == workspace for w in original["windowHomes"]):
-        raise RuntimeError("The focused cell must be an empty normal workspace")
-    before_session, _, _, before_rows = history()
-    if not before_session:
-        raise RuntimeError("Enable local diagnostics in Settings before running this smoke")
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    with fixture_session(lambda desktop: next(d for d in desktop["displays"] if d["monitor"] == desktop["focusedMonitor"])) as session:
+        verify(session)
+    print("PASS: isolated controller recorded geometry, fullscreen attribution, navigation and transient unknown occupancy")
+
+
+def verify(session):
+    path = session.directory / "diagnostics/history.jsonl"
+    session.start_verifier("--fixture-observe")
+    monitor, workspace = session.monitor, session.workspace
+
+    def starting_history():
+        session.check_observer()
+        result = history(path)
+        return result if result[0] else None
+
+    before_session, _, _, before_rows = wait_for(starting_history, "isolated diagnostic history")
     start = before_rows[-1]["sequence"]
-    fixture = subprocess.Popen([str(FIXTURE)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     target = None
-    blind = False
+    blind_marker = session.directory / "blind-window.json"
 
     def fixture_windows():
-        return [w for w in status()["windows"] if w["pid"] == fixture.pid]
+        return [w for w in status()["windows"] if w["pid"] == session.pid]
 
     def observe():
-        session, backend, grid, rows = history()
-        if session != before_session:
-            raise RuntimeError("AeroGrid restarted during the smoke")
-        return backend, grid, [row for row in rows if row["session"] == session and row["sequence"] > start]
+        session.check_observer()
+        identifier, backend, grid, rows = history(path)
+        if identifier != before_session:
+            raise RuntimeError("The fixture observer restarted during the smoke")
+        return backend, grid, [row for row in rows if row["session"] == identifier and row["sequence"] > start]
 
     def normal_samples():
-        backend, _, rows = observe()
+        backend, _, _ = observe()
         display = next((d for d in backend.get("displays", {}).values() if d["monitor"] == monitor), {})
         members = {key: row for key, row in backend.get("windows", {}).items()
                    if row["workspace"] == display.get("visibleWorkspace")}
-        if len(members) == 3 and rows and all(w.get("frame") and w.get("nativeSpaces") for w in members.values()):
+        if len(members) == 3 and all(w.get("frame") and w.get("nativeSpaces") for w in members.values()):
             return set(members)
 
     def blind_fixture(seconds):
-        command(CLI, "grid-layout", "--data", json.dumps({"windowID": target, "seconds": seconds, "forget": True}), "debug-blind")
+        command("grid-layout", "--data", json.dumps({"windowID": target, "seconds": seconds, "forget": True}), "debug-blind")
 
     def current_native_space():
-        displays = status()["placementDiagnostics"]["nativeDisplays"]
-        return next(display["current"] for display in displays if display.get("monitor") == monitor)
+        return native_by_monitor(status())[str(monitor)]["current"]
 
     try:
-        real = wait_for(lambda: windows if len(windows := fixture_windows()) == 3 else None, "three fixture windows")
-        if any(w["workspace"] != workspace for w in real):
-            raise RuntimeError("The fixture landed outside the empty test cell")
+        real = session.windows
         members = wait_for(normal_samples, "recorded window frames and native memberships")
         target = real[0]["id"]
-        command(CLI, "macos-native-fullscreen", "--window-id", target, "on")
+        command("macos-native-fullscreen", "--window-id", target, "on")
 
         def fullscreen_samples():
             backend, grid, _ = observe()
@@ -144,10 +106,13 @@ def main():
                             return window, space["id"]
 
         window, space = wait_for(fullscreen_samples, "correlated fullscreen map card and native Space")
-        raw_map = json.loads(command(APP, "--map"))
-        fixture_cell = next(cell["id"] for cell in raw_map["spaces"]
-                            if cell.get("nativeWindow") == {key: real[0][key] for key in ("id", "pid", "boot")})
-        command(APP, "--action", "jump", fixture_cell)
+        def saved_cell():
+            raw_map = json.loads((session.directory / "state.json").read_text())["dynamicMap"]
+            identity = {key: real[0][key] for key in ("id", "pid", "boot")}
+            return next((cell["id"] for cell in raw_map["spaces"] if cell.get("nativeWindow") == identity), None)
+
+        fixture_cell = wait_for(saved_cell, "persisted isolated fullscreen card")
+        session.jump(fixture_cell)
 
         def action_observed(after=0):
             _, _, rows = observe()
@@ -160,10 +125,10 @@ def main():
         fullscreen_space = current_native_space()
         # A focused window can be discovered again in the backend's light session.
         # Leave the fullscreen Space in the background while testing discovery loss.
-        command(CLI, "grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": monitor}), "activate-target")
+        activate(workspace, monitor)
         wait_for(lambda: current_native_space() != fullscreen_space, "return to the normal test desktop")
+        write_json(blind_marker, target)
         blind_fixture(30)
-        blind = True
 
         def unattributed_space():
             backend, _, _ = observe()
@@ -173,32 +138,23 @@ def main():
 
         wait_for(unattributed_space, "native fullscreen Space with unknown occupancy")
         blind_fixture(0)
-        blind = False
-        command(CLI, "grid-layout", "--data", fullscreen_space, "native-focus")
+        blind_marker.unlink()
+        command("grid-layout", "--data", fullscreen_space, "native-focus")
         wait_for(fullscreen_samples, "restored fullscreen attribution")
-        command(CLI, "grid-layout", "--workspace", workspace, "--data", json.dumps({"monitor": monitor}), "activate-target")
+        activate(workspace, monitor)
         wait_for(lambda: current_native_space() != fullscreen_space, "background fixture fullscreen Space")
         last_action = observe()[2][-1]["sequence"]
-        command(APP, "--action", "jump", fixture_cell)
+        session.jump(fixture_cell)
         wait_for(lambda: action_observed(last_action) and current_native_space() == fullscreen_space,
                  "frontend navigation to the recovered background fullscreen Space")
-        assert stat.S_IMODE(HISTORY.stat().st_mode) == 0o600
-        assert stat.S_IMODE(HISTORY.parent.stat().st_mode) == 0o700
-        print("PASS: active installation recorded normal geometry, fullscreen attribution, navigation and transient unknown occupancy")
+        if stat.S_IMODE(path.stat().st_mode) != 0o600 or stat.S_IMODE(path.parent.stat().st_mode) != 0o700:
+            raise RuntimeError("Diagnostic history is not private")
     finally:
-        try:
-            if blind:
-                blind_fixture(0)
-            if target is not None and any(w["id"] == target and w["nativeFullscreen"] for w in fixture_windows()):
-                command(CLI, "macos-native-fullscreen", "--window-id", target, "off")
-        finally:
-            if fixture.poll() is None:
-                fixture.terminate()
-                try:
-                    fixture.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    fixture.kill()
-                    fixture.wait(timeout=5)
+        if blind_marker.exists():
+            blind_fixture(0)
+            blind_marker.unlink()
+        if target is not None and any(w["id"] == target and w["nativeFullscreen"] for w in fixture_windows()):
+            command("macos-native-fullscreen", "--window-id", target, "off")
 
 
 if __name__ == "__main__":

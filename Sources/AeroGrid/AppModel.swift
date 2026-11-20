@@ -9,6 +9,8 @@ final class AppModel: ObservableObject {
     @Published var state = RuntimeState()
     @Published var message = "Iniciando AeroGrid…"
     @Published var organizationError: String?
+    @Published private(set) var setups: [Setup] = []
+    @Published private(set) var missingBundleIDs: [String] = []
     @Published var gestureMessage = "Swipe to inspect recognition"
     @Published private(set) var paused = false { didSet { if paused { input.reset() } } }
     @Published private(set) var pauseChanging = false
@@ -21,6 +23,7 @@ final class AppModel: ObservableObject {
     private var managementNeedsSync = true
     private var backendLaunchPolicy = BackendLaunchPolicy()
     private var shuttingDown = false
+    private var leavingBackendRunning = false
     @Published var testingGestures = false { didSet { if testingGestures { input.reset() } } }
     @Published private(set) var recordingLocalDiagnostics: Bool
     @Published var recordingGesturePackets = false {
@@ -77,21 +80,36 @@ final class AppModel: ObservableObject {
     @Published var draggedSpace: String?
     @Published var mergePreview: MergePreview?
     @Published var reunitePreview: ReunitePreview?
-    init() throws {
-        directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
+    init(fixture: (URL, FixtureSession.Request)? = nil) throws {
+        directory = fixture?.0 ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
         store = try Store(directory: directory)
-        let enabled = diagnosticsPreference.enabled
+        let enabled = fixture != nil || diagnosticsPreference.enabled
         recordingLocalDiagnostics = enabled
         diagnostics = DiagnosticHistory(directory: directory.appendingPathComponent(DiagnosticLogFile.directoryName, isDirectory: true), enabled: enabled)
-        let defaultBackend = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/AeroGrid Backend.app/Contents/Resources/aerospace").path
-        let config = try store.load(Configuration.self, name: "config.json") ?? Configuration(backendPath: defaultBackend)
+        let config: Configuration
+        if let (_, request) = fixture {
+            let role = request.display.builtin ? "builtin" : "external"
+            var isolated = Configuration(backendPath: FixtureSession.backend)
+            let cell = Cell(id: request.workspace, row: 0, column: 0, name: "Fixture", workspace: request.workspace)
+            isolated.grids = [GridCore.Grid(id: "fixture", name: "Fixture", displayRole: role, cells: [cell])]
+            isolated.displayAssignments = [role: request.display.id]
+            config = isolated
+        } else {
+            config = try store.load(Configuration.self, name: "config.json") ?? Configuration(backendPath: FixtureSession.backend)
+        }
         try config.validate()
         let saved = try store.load(RuntimeState.self, name: "state.json") ?? RuntimeState()
         configuration = config
+        setups = try store.loadSetups()
         backend = AeroSpaceBackend(path: config.backendPath); management = backend
         backend.diagnosticHistory = diagnostics
+        if let (_, request) = fixture { backend.filterDesktop = request.fixtureDesktop }
         paused = try store.load(WindowManagerPreferences.self,name:"control.json")?.paused ?? false
         engine = try DynamicEngine(configuration: config, state: saved, backend: backend, store: store)
+        if fixture == nil, let login = LoginSession.consoleLoginDate() {
+            let deadline = login.addingTimeInterval(300)
+            engine.placeRestoreDeadline = Date() < deadline ? deadline : nil
+        }
         input = GestureInput(configuration: config)
         try store.save(config, name: "config.json")
         input.target = { [weak self] in self?.targetDisplay() }
@@ -361,6 +379,16 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    func refreshFixture() {
+        _ = updateGate()
+        guard reconciliationOpen.value else { return }
+        perform("refresh", feedback: false) { try $0.refresh() }
+    }
+    func openFixtureSpace(_ id: String, display: String) {
+        _ = updateGate()
+        guard reconciliationOpen.value else { return }
+        openSpace(id, displayID: display, feedback: false)
+    }
     func navigate(_ direction: Direction, scope: Scope, displayID: String? = nil) {
         let id = displayID ?? targetDisplay()
         perform("navigate", display: id, direction: direction, scope: scope) { try $0.navigate(direction, scope: scope, displayID: id) }
@@ -452,14 +480,16 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func prepareToQuit(_ completion:@escaping () -> Void) {
+    func prepareToQuit(preservingBackend: Bool = false, _ completion:@escaping () -> Void) {
         diagnostics.event("lifecycle", ["event": "stopping"])
         shuttingDown = true
+        leavingBackendRunning = preservingBackend
         pauseChanging = true; input.stop(); deferredContacts.removeAll(); pendingOperations.removeAll(); closeOverview?(false)
         queue.async {
-            if !self.isPreview && self.ownsBackend { try? self.backend.setManagementEnabled(false) }
+            let stopBackend = !preservingBackend && !self.isPreview && self.ownsBackend
+            if stopBackend { try? self.backend.setManagementEnabled(false) }
             DispatchQueue.main.async {
-                if !self.isPreview && self.ownsBackend {
+                if stopBackend {
                     for app in NSRunningApplication.runningApplications(withBundleIdentifier:"local.AeroGrid.Backend") { app.terminate() }
                 }
                 completion()
@@ -486,7 +516,10 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.openApplication(at:url,configuration:options) { [weak self] application, error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.shuttingDown { application?.terminate(); return }
+                if self.shuttingDown {
+                    if !self.leavingBackendRunning { application?.terminate() }
+                    return
+                }
                 self.diagnostics.event("lifecycle", ["event": error == nil ? "backend-launched" : "backend-launch-failed"])
                 guard error != nil else { return }
                 self.message = "No se pudo iniciar el servicio de AeroGrid. Usá Recuperar."
@@ -611,6 +644,8 @@ final class AppModel: ObservableObject {
             if let id = UInt32(args[1]), let window = desktop?.windows?.first(where: { $0.id == id }) { moveWindow(window.identity, to: args[2]) }
         case "arrange" where args.count == 4: arrange(args[1], layout: args[2], orientation: args[3])
         case "reunite" where args.count == 2: reunite(args[1])
+        case "restore-places": restorePlaces()
+        case "apply-setup" where args.count == 2: applySetup(id: args[1])
         case "undo": undoOrganization()
         case "recover": recover()
         case "permissions": requestPermission()
@@ -628,8 +663,8 @@ final class AppModel: ObservableObject {
         if let identity = space.nativeWindow { return (desktop?.windows ?? []).filter { $0.identity == identity } }
         return (desktop?.windows ?? []).filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
     }
-    func openSpace(_ id: String, displayID: String?) {
-        perform("openSpace", cells: [id], display: displayID) { engine in
+    func openSpace(_ id: String, displayID: String?, feedback: Bool = true) {
+        perform("openSpace", cells: [id], display: displayID, feedback: feedback) { engine in
             try engine.jump(cellID: id, displayID: displayID)
             DispatchQueue.main.async { self.closeOverview?(false) }
         }
@@ -673,6 +708,65 @@ final class AppModel: ObservableObject {
     func reunite(_ preview: ReunitePreview) {
         perform("reunite", cells: [preview.sourceID]) { try $0.reunite(sourceID: preview.sourceID, expectedOwners: Set(preview.windows.map(\.identity))) }
         reunitePreview = nil
+    }
+    func restorePlaces() {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        var count = 0
+        perform("restorePlaces", completion: { [weak self] error in
+            if error == nil { self?.message = count == 0 ? "Todo está en su lugar" : count == 1 ? "Una ventana volvió a su lugar" : "\(count) ventanas volvieron a su lugar" }
+        }) { engine in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            count = try engine.restorePlaces()
+        }
+    }
+    private func changeSetups(_ action: String, _ change: @escaping (DynamicEngine, inout [Setup]) throws -> Void) {
+        var updated: [Setup] = []
+        perform(action, completion: { [weak self] error in
+            if error == nil { self?.setups = updated }
+        }) { engine in
+            updated = try self.store.loadSetups()
+            try change(engine, &updated)
+            try self.store.saveSetups(updated)
+        }
+    }
+    func saveSetup(name: String) {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        changeSetups("saveSetup") { engine, setups in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            setups.append(try engine.makeSetup(name: name))
+        }
+    }
+    func applySetup(id: String) {
+        guard isPreview || gate.isOpen(at: ProcessInfo.processInfo.systemUptime) else { return }
+        var result: SetupApplyResult?
+        perform("applySetup", completion: { [weak self] error in
+            if error == nil, let result { self?.missingBundleIDs = result.missingBundleIDs }
+        }) { engine in
+            guard self.isPreview || self.reconciliationOpen.value else { throw GridError.unavailable("La sesión está en reposo") }
+            guard let setup = try self.store.loadSetups().first(where: { $0.id == id }) else { throw GridError.stale }
+            result = try engine.applySetup(setup)
+        }
+    }
+    func renameSetup(id: String, name: String) {
+        changeSetups("renameSetup") { _, setups in
+            guard let index = setups.firstIndex(where: { $0.id == id }) else { throw GridError.stale }
+            setups[index].name = name
+        }
+    }
+    func dismissMissingApps() { missingBundleIDs = [] }
+    /// Display name for an app the user is asked to open; shown in the organizer only, never logged.
+    func appDisplayName(bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
+    func deleteSetup(id: String) { changeSetups("deleteSetup") { _, setups in setups.removeAll { $0.id == id } } }
+    func openApp(bundleID: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            message = "No se encontró la app"; return
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+            if error != nil { DispatchQueue.main.async { self?.message = "No se pudo abrir la app" } }
+        }
     }
     func undoOrganization() { perform("undo") { try $0.undo() } }
     func createSpace(near: String? = nil, moving: WindowIdentity? = nil, displayID: String? = nil) {
