@@ -51,6 +51,8 @@ Named setups save map geometry and place templates in `setups.json`. Applying a 
 
 Background refresh publishes desktop, map, hints and readiness only when their values change. Semantically identical layout snapshots keep their existing bytes, avoiding invalidations caused solely by JSON key order. Closed settings/organizer windows release their hosting views; settings construct only the active section rather than retaining all tabs in a native toolbar-backed TabView.
 
+Within a running session, a recently observed single-window app can reclaim its card after its process exits and a new process of the same bundle opens a replacement window. This runs before workspace adoption and display folding. The 90-second match uses the current boot and gives window rules and ambiguous multi-window apps precedence. A reopened fullscreen window can reuse its original card and home. If it reopens windowed after sharing a fullscreen home, the old card gets an independent workspace at the same grid position. The history records the result with aliased identifiers.
+
 On disconnect, parallel layout groups become neighboring destinations; stacked subtrees remain intact. Family records preserve the original nested arrangement and proportions. Reconnection can recompose unchanged families without overwriting arrangements the user edited.
 
 ## Bundled engine

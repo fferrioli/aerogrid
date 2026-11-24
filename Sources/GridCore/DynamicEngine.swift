@@ -10,6 +10,18 @@ public final class DynamicEngine {
     private let now: () -> Date
     private var placeWorkspaces: [WindowIdentity: String] = [:]
     private var restoringPlaces = false
+    private var relaunchPlaces: [String: RelaunchPlace] = [:]
+    private var fullscreenRelaunches: [WindowIdentity: FullscreenPlace] = [:]
+    private var multiwindowRelaunchOwners: Set<Int32> = []
+    private static let relaunchInterval: TimeInterval = 90
+
+    private struct RelaunchPlace {
+        let identity: WindowIdentity
+        let card: Space
+        let fullscreenHome: String?
+        let manuallyEdited: Bool
+        let lastSeen: Date
+    }
     private let store: Store?
     public static let absenceConfirmations = 3
     public static let exitConfirmations = 2
@@ -143,9 +155,9 @@ public final class DynamicEngine {
         return inventory.filter { $0.workspace == space.workspace && !$0.nativeFullscreen }
     }
     private func fullscreenPlace(for identity: WindowIdentity) -> FullscreenPlace? {
-        map.fullscreenPlaces?.first { place in
-            place.space.nativeWindow == identity && map.spaces.contains { $0.workspace == place.space.workspace }
-        }
+        let place = fullscreenRelaunches[identity] ?? map.fullscreenPlaces?.first { $0.space.nativeWindow == identity }
+        guard let place, map.spaces.contains(where: { $0.workspace == place.space.workspace }) else { return nil }
+        return place
     }
     private func readDesktop() throws -> Desktop {
         var desktop = try backend.desktop()
@@ -526,6 +538,7 @@ public final class DynamicEngine {
         if blackoutSamples > 0 { emit(.inventoryRecovered, reason: desktop.windows?.isEmpty == true ? "empty" : "populated", count: blackoutSamples) }
         blackoutSamples = 0
         if let pending = map.pending {
+            relaunchPlaces.removeAll()
             do {
                 try restore(pending.before)
                 editMap { $0.pending = nil }
@@ -551,7 +564,10 @@ public final class DynamicEngine {
         }
         sync(try readDesktop())
         trackPlaceMovement(observed ?? desktop, inferUserPlacement: !recovering)
-        adoptUnmappedWorkspaces()
+        if restarted || before?.topology != desktop.topology {
+            relaunchPlaces.removeAll()
+            multiwindowRelaunchOwners.removeAll()
+        }
         try reconcileFullscreen(previous: before)
         if !restoringPlaces, let deadline = placeRestoreDeadline, now() < deadline {
             _ = try applyPlaces(automatic: true)
@@ -599,6 +615,7 @@ public final class DynamicEngine {
             }
         }
         try persist()
+        rememberRelaunchPlaces()
     }
     private func restoreDisplayPositions(before: Desktop) throws {
         guard let desktop = observed else { return }
@@ -628,6 +645,124 @@ public final class DynamicEngine {
             }
         }
         sync(try readDesktop())
+    }
+    private func appWindows() -> [String: [WindowInfo]] {
+        Dictionary(grouping: windows.filter { !$0.bundleID.isEmpty }, by: \.bundleID)
+    }
+    private func rememberRelaunchPlaces() {
+        let sampleTime = now()
+        relaunchPlaces = relaunchPlaces.filter { sampleTime.timeIntervalSince($0.value.lastSeen) < Self.relaunchInterval }
+        multiwindowRelaunchOwners = multiwindowRelaunchOwners.filter(isProcessAlive)
+        for (bundle, members) in appWindows() {
+            // Ambiguous owners stay excluded when shutdown closes their windows one at a time.
+            let ambiguous = members.count > 1 || members.contains { hasOtherWindows($0) }
+            if ambiguous { multiwindowRelaunchOwners.formUnion(members.map(\.pid)) }
+            guard !ambiguous, let window = members.first, window.ruled != true,
+                  !multiwindowRelaunchOwners.contains(window.pid) else {
+                relaunchPlaces.removeValue(forKey: bundle)
+                continue
+            }
+            let link = map.fullscreens.first { $0.identity == window.identity }
+            let card: Space?
+            if let link {
+                card = map.spaces.first { $0.id == link.spaceID }
+            } else if !window.nativeFullscreen && window.nativeSpace != "fullscreen" {
+                card = map.spaces.first { $0.nativeWindow == nil && $0.workspace == window.workspace }
+            } else {
+                card = nil
+            }
+            guard let card else {
+                relaunchPlaces.removeValue(forKey: bundle)
+                continue
+            }
+            relaunchPlaces[bundle] = RelaunchPlace(identity: window.identity, card: card, fullscreenHome: link?.homeID,
+                                                 manuallyEdited: link?.manuallyEdited == true, lastSeen: sampleTime)
+        }
+    }
+    private func hasOtherWindows(_ window: WindowInfo) -> Bool {
+        observed?.windowHomes?.contains { $0.pid == window.pid && $0.id != window.id } == true
+    }
+    private func restoreRelaunchPlaces() -> Bool {
+        var needsReadback = false
+        let inventory = appWindows()
+        for (bundle, place) in relaunchPlaces.sorted(by: { $0.key < $1.key }) {
+            guard let members = inventory[bundle], members.count == 1, let window = members.first,
+                  window.pid != place.identity.pid else { continue }
+            relaunchPlaces.removeValue(forKey: bundle)
+            let sampleTime = now()
+            let elapsed = sampleTime.timeIntervalSince(place.lastSeen)
+            let homeID = place.fullscreenHome ?? place.card.id
+            guard (0..<Self.relaunchInterval).contains(elapsed), window.boot == place.identity.boot,
+                  !isProcessAlive(place.identity.pid), window.ruled != true, !hasOtherWindows(window),
+                  map.placeRestore?.userPlaced.contains(window.identity) != true,
+                  let home = map.spaces.first(where: { $0.id == homeID && $0.workspace == place.card.workspace
+                      && $0.nativeWindow == nil }) else { continue }
+
+            if window.nativeFullscreen || window.nativeSpace == "fullscreen" {
+                guard place.fullscreenHome != nil else { continue }
+                var card = place.card.id == home.id ? home : place.card
+                card.nativeWindow = window.identity
+                fullscreenRelaunches[window.identity] = FullscreenPlace(space: card, manuallyEdited: place.manuallyEdited,
+                                                                       removedAt: sampleTime)
+                needsReadback = true
+                continue
+            }
+
+            // A verified move keeps the replacement out of the temporary launch workspace before folding.
+            guard window.nativeSpace == nil || window.nativeSpace == "normal" else { continue }
+            do {
+                let moved = try restoreWindowedRelaunch(window, place: place, home: home)
+                needsReadback = needsReadback || moved
+            } catch {
+                emit(.placeRelaunchFailed, reason: "windowed", window: window.identity, space: place.card.id)
+            }
+        }
+        return needsReadback
+    }
+    private func restoreWindowedRelaunch(_ window: WindowInfo, place: RelaunchPlace, home: Space) throws -> Bool {
+        var target = home
+        var next = map
+        if place.card.id != home.id {
+            // The old fullscreen card shared a backend workspace. Its windowed replacement needs
+            // a private workspace so it can occupy exactly the same independent grid position.
+            target = place.card
+            target.workspace = SpaceMap.derivedIdentity(sourceID: target.id, component: "windowed-relaunch").workspace
+            target.sourceID = nil
+            target.nativeWindow = nil
+            guard !next.spaces.contains(where: { $0.id == target.id || $0.workspace == target.workspace }),
+                  observed?.windowHomes?.contains(where: { $0.workspace == target.workspace }) != true else { throw GridError.stale }
+            target = availableCardPosition(target)
+            next.spaces.append(target)
+        } else if target.isDormant, let index = next.spaces.firstIndex(where: { $0.id == target.id }) {
+            target = availableCardPosition(target)
+            next.spaces[index] = target
+        }
+        try next.validate()
+        if window.workspace != target.workspace {
+            try backend.moveVerified(window: window.identity, workspace: target.workspace)
+        }
+        if next.placeRestore?.restored.contains(window.identity) == false {
+            next.placeRestore?.restored.append(window.identity)
+        }
+        state.dynamicMap = next
+        emit(.placeRelaunched, reason: "windowed", window: window.identity, space: target.id)
+        return window.workspace != target.workspace
+    }
+    private func availableCardPosition(_ card: Space) -> Space {
+        var result = card
+        let occupied = map.spaces.filter { !$0.isDormant && $0.id != card.id }
+        let board = occupied.filter { $0.board == card.board }.map(\.rect)
+        if board.contains(where: { $0.overlaps(card.rect) }) {
+            result.rect = SpacePlacement.nearestVacancy(near: card.rect, occupied: board, width: card.rect.width, height: card.rect.height)
+        }
+        if let folded = card.foldedRect {
+            let adapted = occupied.compactMap(\.foldedRect)
+            if adapted.contains(where: { $0.overlaps(folded) }) {
+                result.foldedRect = SpacePlacement.nearestVacancy(near: folded, occupied: adapted, width: folded.width, height: folded.height)
+            }
+        }
+        result.dormant = false
+        return result
     }
     private func adoptUnmappedWorkspaces() {
         guard let desktop = observed else { return }
@@ -792,7 +927,10 @@ public final class DynamicEngine {
             }
         }
         sync(try readDesktop())
+        defer { fullscreenRelaunches.removeAll() }
+        if restoreRelaunchPlaces() { sync(try readDesktop()) }
         if returnRememberedFullscreens(failedReturns: &failedReturns) { sync(try readDesktop()) }
+        adoptUnmappedWorkspaces()
         for window in windows where window.nativeFullscreen && !map.fullscreens.contains(where: { $0.identity == window.identity }) {
             guard !failedReturns.contains(window.identity) else { continue }
             let remembered = fullscreenPlace(for: window.identity)
@@ -816,15 +954,9 @@ public final class DynamicEngine {
                 exclusive = remembered.space
                 if map.spaces.contains(where: { $0.id == exclusive.id }) { exclusive.id = generated.id }
                 exclusive.workspace = home.workspace; exclusive.sourceID = home.id
-                if !map.fits(exclusive.rect, board: exclusive.board) {
-                    exclusive.rect = SpacePlacement.nearestVacancy(near: exclusive.rect, occupied: map.spaces.filter { !$0.isDormant && $0.board == exclusive.board }.map(\.rect), width: exclusive.rect.width, height: exclusive.rect.height)
-                }
             }
-            if !ownHome || shared, let folded = exclusive.foldedRect {
-                let occupied = map.spaces.filter { !$0.isDormant }.compactMap(\.foldedRect)
-                if occupied.contains(where: { $0.overlaps(folded) }) {
-                    exclusive.foldedRect = SpacePlacement.nearestVacancy(near: folded, occupied: occupied, width: folded.width, height: folded.height)
-                }
+            if !ownHome || shared {
+                exclusive = availableCardPosition(exclusive)
             }
             exclusive.nativeWindow = window.identity
             fullscreenReturnFailures.remove(window.identity)
@@ -837,6 +969,11 @@ public final class DynamicEngine {
                 map.fullscreens.append(FullscreenLink(spaceID: exclusive.id, homeID: home.id, identity: window.identity, original: original, manuallyEdited: remembered?.manuallyEdited ?? false))
                 map.fullscreenPlaces?.removeAll { $0.space.nativeWindow == window.identity }
             }
+        }
+        for (identity, place) in fullscreenRelaunches {
+            let card = map.fullscreens.first { $0.identity == identity }
+            emit(card == nil ? .placeRelaunchFailed : .placeRelaunched, reason: "fullscreen",
+                 window: identity, space: card?.spaceID ?? place.space.id)
         }
         sync(try readDesktop())
     }

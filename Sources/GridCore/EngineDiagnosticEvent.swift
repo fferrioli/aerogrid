@@ -25,6 +25,8 @@ public struct EngineDiagnosticEvent {
         case navigationMismatch = "navigation-mismatch"
         case navigationRollback = "navigation-rollback"
         case focusMismatch = "focus-mismatch"
+        case placeRelaunched = "place-relaunched"
+        case placeRelaunchFailed = "place-relaunch-failed"
         case placeRestored = "place-restored"
         case placeRestoreFailed = "place-restore-failed"
         case placeLayoutFailed = "place-layout-failed"
