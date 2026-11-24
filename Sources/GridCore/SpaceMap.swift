@@ -108,6 +108,7 @@ public struct Space: Codable, Equatable, Identifiable {
     public var spanRows: Int? = nil
     public var boardID: String? = nil
     public var dormant: Bool? = nil
+    public var hiddenFullscreenHome: Bool? = nil
     public var automaticName: Bool? = nil
     public var foldedRect: SpaceRect? = nil
     public init(id: String = UUID().uuidString, name: String, row: Int, column: Int, workspace: String, preferredRole: String) {

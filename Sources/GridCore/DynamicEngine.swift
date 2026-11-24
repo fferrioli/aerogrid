@@ -184,7 +184,17 @@ public final class DynamicEngine {
         if map.version >= 3 {
             for index in map.spaces.indices where map.spaces[index].isDormant {
                 let space = map.spaces[index]
-                guard desktop.windows?.contains(where: { $0.workspace == space.workspace }) == true || desktop.visible.values.contains(space.workspace) else { continue }
+                if space.hiddenFullscreenHome == true {
+                    // Fullscreen windows and the underlying visible workspace do not occupy this card.
+                    guard desktop.windows?.contains(where: { window in
+                        window.workspace == space.workspace && !window.nativeFullscreen
+                            && window.nativeSpace != "fullscreen" && window.nativeSpace != "unknown"
+                            && !map.fullscreens.contains { $0.identity == window.identity }
+                    }) == true else { continue }
+                } else {
+                    guard desktop.windows?.contains(where: { $0.workspace == space.workspace }) == true
+                        || desktop.visible.values.contains(space.workspace) else { continue }
+                }
                 var next = map
                 if !next.fits(space.rect, board: space.board, excluding: [space.id]) {
                     let occupied = next.spaces.filter { $0.board == space.board && !$0.isDormant && $0.id != space.id }.map(\.rect)
@@ -192,6 +202,7 @@ public final class DynamicEngine {
                 }
                 emit(.spaceWoken, space: space.id)
                 next.spaces[index].dormant = false
+                next.spaces[index].hiddenFullscreenHome = nil
                 next.spaces[index].foldedRect = nil // A dormant slot no longer reserves its old adapted position.
                 state.dynamicMap = next
             }
@@ -212,7 +223,7 @@ public final class DynamicEngine {
         }
     }
     private func capturePlaceTemplate(_ space: Space, layout: LayoutSnapshot?, preservingContractions: Bool) {
-        guard !windows.isEmpty else { return }
+        guard !windows.isEmpty, space.hiddenFullscreenHome != true else { return }
         let preserveContraction = preservingContractions && !hasWindowMovedOut(of: space)
         let captured: PlaceTemplate?
         if let identity = space.nativeWindow {
@@ -696,7 +707,8 @@ public final class DynamicEngine {
                   !isProcessAlive(place.identity.pid), window.ruled != true, !hasOtherWindows(window),
                   map.placeRestore?.userPlaced.contains(window.identity) != true,
                   let home = map.spaces.first(where: { $0.id == homeID && $0.workspace == place.card.workspace
-                      && $0.nativeWindow == nil }) else { continue }
+                      && $0.nativeWindow == nil }),
+                  place.fullscreenHome != nil || home.hiddenFullscreenHome != true else { continue }
 
             if window.nativeFullscreen || window.nativeSpace == "fullscreen" {
                 guard place.fullscreenHome != nil else { continue }
@@ -944,7 +956,8 @@ public final class DynamicEngine {
             }
             let original = try snapshot(home)
             let ownHome = remembered?.space.id == home.id
-            let shared = (remembered != nil && !ownHome) || windows.contains { $0.workspace == window.workspace && $0.identity != window.identity }
+            let shared = home.hiddenFullscreenHome == true || (remembered != nil && !ownHome)
+                || windows.contains { $0.workspace == window.workspace && $0.identity != window.identity }
             var exclusive = home
             if shared {
                 exclusive = try exclusiveSpace(home: home, window: window)
@@ -1325,9 +1338,11 @@ public final class DynamicEngine {
         if !repaired.isEmpty { recoveryNotice = "Se repararon las posiciones adaptadas al recuperar la organización anterior." }
         sync(try readDesktop())
     }
-    private func organize(_ label: String, recordsUserPlacement: Bool = true, _ work: () throws -> Void) throws {
+    private func organize(_ label: String, recordsUserPlacement: Bool = true,
+                          validate: () throws -> Void = {}, _ work: () throws -> Void) throws {
         try refresh()
         guard let desktop = observed else { throw GridError.stale }
+        try validate()
         let before = try checkpoint()
         let previousTemplates = map.placeTemplates
         let previousRestoration = map.placeRestore
@@ -1466,13 +1481,11 @@ public final class DynamicEngine {
         let originalDesktop = observed, originalCursors = map.cursors
         var switched = false
         do {
-            try organize("Eliminar espacio vacío") {
-                guard let space = self.map.spaces.first(where: { $0.id == id }) else { throw GridError.invalid("El espacio ya no existe") }
-                guard self.contents(of:space).isEmpty, space.nativeWindow == nil else { throw GridError.invalid("Mové o cerrá sus ventanas antes de eliminar el espacio") }
-                guard !self.map.fullscreens.contains(where: { $0.homeID == id }) else {
-                    throw GridError.invalid("Este espacio recibe una ventana en fullscreen. Salí de pantalla completa para eliminarlo")
-                }
-                guard self.map.spaces.count > 1, let desktop = self.observed else { throw GridError.invalid("Creá otro espacio antes de eliminar éste") }
+            var hiddenHome = false
+            try organize("Eliminar espacio vacío", validate: { _ = try self.emptySpaceForRemoval(id) }) {
+                let space = try self.emptySpaceForRemoval(id)
+                guard let desktop = self.observed else { throw GridError.stale }
+                hiddenHome = self.map.fullscreens.contains { $0.homeID == id }
                 // Leave a visible empty workspace first, otherwise discovery recreates it on the next poll.
                 for display in desktop.displays where self.currentSpace(on:display)?.id == id {
                     let allowed = self.eligibleSpaces(on:display).subtracting([id])
@@ -1498,7 +1511,17 @@ public final class DynamicEngine {
                             map.families[index] = family
                         }
                     }
-                    map.spaces.removeAll { $0.id == id }; map.layouts.removeValue(forKey:id)
+                    if hiddenHome, let index = map.spaces.firstIndex(where: { $0.id == id }) {
+                        // Keep the routing identity for fullscreen exit, but free the grid slot.
+                        map.spaces[index].hiddenFullscreenHome = true
+                        map.spaces[index].dormant = true
+                        map.spaces[index].userCreated = false
+                        map.spaces[index].sourceID = nil
+                    } else {
+                        map.spaces.removeAll { $0.id == id }
+                    }
+                    map.layouts.removeValue(forKey: id)
+                    map.placeTemplates?.removeValue(forKey: id)
                     // Keep the deleted map stable across the next refresh's place pruning.
                     map.fullscreenPlaces?.removeAll { place in !map.spaces.contains { $0.workspace == place.space.workspace } }
                     map.cursors = map.cursors.filter { $0.value != id }
@@ -1506,11 +1529,33 @@ public final class DynamicEngine {
                     map.anchors = map.anchors?.filter { $0.value.spaceID != id }
                 }
             }
+            if hiddenHome { emit(.fullscreenHomeHidden, space: id) }
         } catch {
             let failure = error
             if switched, let originalDesktop { try restoreVisible(originalDesktop,cursors:originalCursors) }
             throw failure
         }
+    }
+    private func emptySpaceForRemoval(_ id: String) throws -> Space {
+        guard let space = map.spaces.first(where: { $0.id == id }), space.hiddenFullscreenHome != true else {
+            throw GridError.invalid("El espacio ya no existe")
+        }
+        let fullscreenOwners = Set(map.fullscreens.filter { $0.homeID == id }.map(\.identity))
+        let desktop = try readDesktop()
+        guard desktop.windows != nil else { throw GridError.unavailable("AeroGrid todavía está verificando las ventanas de este espacio") }
+        guard space.nativeWindow == nil, contents(of: space, desktop: desktop).isEmpty else {
+            throw GridError.invalid("Mové o cerrá sus ventanas antes de eliminar el espacio")
+        }
+        guard desktop.windowHomes?.contains(where: { home in
+            home.workspace == space.workspace
+                && !fullscreenOwners.contains(WindowIdentity(id: home.id, pid: home.pid, boot: home.boot))
+        }) != true else {
+            throw GridError.unavailable("AeroGrid todavía está verificando las ventanas de este espacio")
+        }
+        guard map.spaces.count > 1 else {
+            throw GridError.invalid("Creá otro espacio antes de eliminar éste")
+        }
+        return space
     }
     public func revealEmptySpace(_ id: String) throws {
         try organize("Crear espacio") {
@@ -1518,7 +1563,11 @@ public final class DynamicEngine {
                   self.map.spaces[index].nativeWindow == nil else { throw GridError.stale }
             let space = self.map.spaces[index]
             guard self.map.fits(space.rect, board: space.board, excluding: [space.id]) else { throw GridError.invalid("Este lugar ya está ocupado") }
-            self.editMap { $0.spaces[index].userCreated = true; $0.spaces[index].dormant = false }
+            self.editMap { map in
+                map.spaces[index].userCreated = true
+                map.spaces[index].dormant = false
+                map.spaces[index].hiddenFullscreenHome = nil
+            }
         }
     }
     public func renameSpace(_ id: String, name: String) throws {

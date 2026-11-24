@@ -245,6 +245,7 @@ extension DiagnosticSnapshot {
         for space in map.spaces {
             let kind: String
             if space.nativeWindow != nil { kind = "fullscreen" }
+            else if space.hiddenFullscreenHome == true { kind = "hiddenFullscreenHome" }
             else if space.isDormant { kind = "reserved" }
             else if space.userCreated { kind = "userCreated" }
             else { kind = "normal" }

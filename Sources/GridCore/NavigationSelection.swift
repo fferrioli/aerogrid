@@ -90,7 +90,7 @@ public struct NavigationSelection {
         let elsewhere = Set(desktop.displays.filter { $0.id != display.id }.compactMap { current(map: map, display: $0, desktop: desktop)?.id })
         let role = configuration.displayAssignments.first { $0.value == display.id }?.key ?? (display.builtin ? "builtin" : "external")
         return Set(map.spaces.filter { space in
-            guard !elsewhere.contains(space.id), (space.userCreated || !contents(space, desktop: desktop).isEmpty) else { return false }
+            guard !space.isDormant, !elsewhere.contains(space.id), (space.userCreated || !contents(space, desktop: desktop).isEmpty) else { return false }
             if let native = space.nativeWindow { return desktop.windows?.first { $0.identity == native }?.nativeMonitor == display.monitor }
             if desktop.displays.count == 1 { return true }
             return space.preferredDisplay.map { $0 == display.id } ?? (space.preferredRole == role)

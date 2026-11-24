@@ -7,6 +7,7 @@ public struct EngineDiagnosticEvent {
         case fullscreenReturnFailed = "fullscreen-return-failed"
         case fullscreenExit = "fullscreen-exit"
         case fullscreenRemoved = "fullscreen-removed"
+        case fullscreenHomeHidden = "fullscreen-home-hidden"
         case fullscreenUnplaced = "fullscreen-unplaced"
         case fullscreenCreated = "fullscreen-created"
         case fullscreenRestored = "fullscreen-restored"

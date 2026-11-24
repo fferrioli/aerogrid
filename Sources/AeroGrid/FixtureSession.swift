@@ -69,6 +69,8 @@ enum FixtureSession {
         let (run, request) = try verificationRequest(token: token)
         let model = try AppModel(fixture: (run, request))
         let jump = run.appendingPathComponent("jump.json")
+        let remove = run.appendingPathComponent("remove-empty-space.json")
+        let undo = run.appendingPathComponent("undo-organization")
         let stop = run.appendingPathComponent("stop-observer")
         let clock = Timer(timeInterval: 0.05, repeats: true) { _ in }
         RunLoop.current.add(clock, forMode: .default)
@@ -80,6 +82,13 @@ enum FixtureSession {
                     let cell = try JSONDecoder().decode(String.self, from: data)
                     try FileManager.default.removeItem(at: jump)
                     model.openFixtureSpace(cell, display: request.display.id)
+                } else if let data = try? Data(contentsOf: remove) {
+                    let cell = try JSONDecoder().decode(String.self, from: data)
+                    try FileManager.default.removeItem(at: remove)
+                    model.removeEmptySpace(cell)
+                } else if FileManager.default.fileExists(atPath: undo.path) {
+                    try FileManager.default.removeItem(at: undo)
+                    model.undoOrganization()
                 } else if Date() >= refreshAt {
                     refreshAt = Date().addingTimeInterval(2)
                     model.refreshFixture()

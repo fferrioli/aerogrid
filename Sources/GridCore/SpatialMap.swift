@@ -241,7 +241,12 @@ extension SpaceMap {
             }
             placed.append(space)
         }
-        return placed + result.filter(\.isDormant)
+        let hiddenHomes = spaces.filter { $0.isDormant && $0.hiddenFullscreenHome == true }.map { space in
+            var anchor = space
+            anchor.rect = space.foldedRect ?? result.first(where: { $0.id == space.id })?.rect ?? space.rect
+            return anchor
+        }
+        return placed + result.filter { $0.isDormant && $0.hiddenFullscreenHome != true } + hiddenHomes
     }
     public func fits(_ rect: SpaceRect, board: String, excluding: Set<String> = []) -> Bool {
         guard rect.isValid else { return false }

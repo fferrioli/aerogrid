@@ -48,7 +48,7 @@ def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     with fixture_session(lambda desktop: next(d for d in desktop["displays"] if d["monitor"] == desktop["focusedMonitor"])) as session:
         verify(session)
-    print("PASS: isolated controller recorded geometry, fullscreen attribution, navigation and transient unknown occupancy")
+    print("PASS: isolated controller recorded geometry, fullscreen attribution, navigation, empty-space deletion and Undo")
 
 
 def verify(session):
@@ -147,6 +147,7 @@ def verify(session):
         session.jump(fixture_cell)
         wait_for(lambda: action_observed(last_action) and current_native_space() == fullscreen_space,
                  "frontend navigation to the recovered background fullscreen Space")
+        verify_delete_fullscreen_home(session, real, target, fixture_cell, observe)
         if stat.S_IMODE(path.stat().st_mode) != 0o600 or stat.S_IMODE(path.parent.stat().st_mode) != 0o700:
             raise RuntimeError("Diagnostic history is not private")
     finally:
@@ -155,6 +156,48 @@ def verify(session):
             blind_marker.unlink()
         if target is not None and any(w["id"] == target and w["nativeFullscreen"] for w in fixture_windows()):
             command("macos-native-fullscreen", "--window-id", target, "off")
+
+
+def verify_delete_fullscreen_home(session, windows, fullscreen_window, fullscreen_cell, observe):
+    state_path = session.directory / "state.json"
+
+    def space_map():
+        return json.loads(state_path.read_text())["dynamicMap"]
+
+    before = space_map()
+    link = next(link for link in before["fullscreens"] if link["spaceID"] == fullscreen_cell)
+    home_id = link["homeID"]
+    if home_id == fullscreen_cell:
+        raise RuntimeError("Expected separate fullscreen and normal fixture cards")
+    card = next(cell for cell in before["spaces"] if cell["id"] == fullscreen_cell)
+    other_workspace = session.workspace + "-laptop"
+    for window in windows:
+        if window["id"] != fullscreen_window:
+            identity = {key: window[key] for key in ("id", "pid", "boot")}
+            command("grid-layout", "--workspace", other_workspace, "--data", json.dumps(identity), "move-window")
+
+    def home_is_hidden():
+        current = space_map()
+        return any(cell["id"] == home_id and cell.get("hiddenFullscreenHome") and cell.get("dormant")
+                   for cell in current["spaces"])
+
+    start = observe()[2][-1]["sequence"]
+    write_json(session.directory / "remove-empty-space.json", home_id)
+    wait_for(home_is_hidden, "the organizer action to hide the empty fullscreen home")
+
+    def action_ok(name, after):
+        return any(row["kind"] == "action" and row["sequence"] > after
+                   and row["payload"]["name"] == name and row["payload"]["outcome"] == "ok" for row in observe()[2])
+
+    wait_for(lambda: action_ok("removeEmptySpace", start), "the recorded deletion action")
+    after = space_map()
+    if link not in after["fullscreens"] or card not in after["spaces"]:
+        raise RuntimeError("Deleting the empty card changed the fullscreen destination")
+    next_action = observe()[2][-1]["sequence"]
+    (session.directory / "undo-organization").touch()
+    wait_for(lambda: action_ok("undo", next_action), "the organizer's Undo action")
+    if home_is_hidden() or link not in space_map()["fullscreens"]:
+        raise RuntimeError("Undo did not recover the empty card and preserve fullscreen")
 
 
 if __name__ == "__main__":

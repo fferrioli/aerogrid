@@ -61,6 +61,103 @@ extension DynamicEngineTests {
         try engine.undo()
         XCTAssertTrue(engine.map.spaces.contains { $0.id == id })
     }
+    func testDeleteEmptyFullscreenHomeKeepsCardsNavigableAndCanBeUndone() throws {
+        backend.screen.windows?[0].nativeFullscreen = true
+        backend.screen.windows?[0].nativeMonitor = ultra.monitor
+        try engine.refresh()
+        backend.screen.windows?[1].nativeFullscreen = true
+        backend.screen.windows?[1].nativeMonitor = ultra.monitor
+        try engine.refresh()
+        backend.screen.nativeVisible?[ultra.monitor] = 1
+
+        let links = engine.map.fullscreens
+        XCTAssertEqual(links.count, 2)
+        XCTAssertTrue(links.allSatisfy { $0.homeID == external.id })
+        let cards = engine.map.spaces.filter { $0.nativeWindow != nil }
+        let members = backend.screen.windows
+        let moves = backend.windowMoves
+        try engine.removeEmptySpace(external.id)
+        try engine.refresh()
+
+        let home = try XCTUnwrap(engine.map.spaces.first { $0.id == external.id })
+        XCTAssertTrue(home.isDormant)
+        XCTAssertEqual(home.hiddenFullscreenHome, true)
+        XCTAssertFalse(engine.eligibleSpaces(on: ultra).contains(external.id))
+        XCTAssertTrue(Set(cards.map(\.id)).isSubset(of: engine.eligibleSpaces(on: ultra)))
+        XCTAssertEqual(engine.map.fullscreens, links)
+        XCTAssertEqual(engine.map.spaces.filter { $0.nativeWindow != nil }, cards)
+        XCTAssertEqual(backend.screen.windows, members)
+        XCTAssertEqual(backend.windowMoves, moves)
+        XCTAssertTrue(engine.consumeDiagnosticEvents().contains { $0.kind == .fullscreenHomeHidden })
+
+        try engine.undo()
+        XCTAssertFalse(try XCTUnwrap(engine.map.spaces.first { $0.id == external.id }).isDormant)
+        XCTAssertEqual(engine.map.fullscreens, links)
+        XCTAssertEqual(backend.screen.windows, members)
+    }
+
+    func testHiddenFullscreenHomeWakesOnlyAfterAWindowReturnsToNormal() throws {
+        backend.screen.windows?[0].nativeFullscreen = true
+        backend.screen.windows?[0].nativeMonitor = ultra.monitor
+        try engine.refresh()
+        backend.setWindows(backend.screen.windows!.filter { $0.id != 2 })
+        try engine.refresh()
+        backend.screen.nativeVisible?[ultra.monitor] = 1
+        try engine.removeEmptySpace(external.id)
+
+        // After native exit the old workspace may be visible before the inventory settles.
+        backend.screen.nativeVisible?.removeValue(forKey: ultra.monitor)
+        backend.screen.windows?[0].nativeFullscreen = false
+        backend.screen.windows?[0].nativeSpace = "normal"
+        try engine.refresh()
+        XCTAssertTrue(try XCTUnwrap(engine.map.spaces.first { $0.id == external.id }).isDormant)
+        try engine.refresh()
+        let reoccupiedHome = try XCTUnwrap(engine.map.spaces.first { $0.id == external.id })
+        XCTAssertFalse(reoccupiedHome.isDormant)
+        XCTAssertNil(reoccupiedHome.hiddenFullscreenHome)
+        XCTAssertEqual(engine.contents(of: reoccupiedHome).map(\.id), [1])
+        XCTAssertTrue(engine.map.fullscreens.isEmpty)
+    }
+
+    func testHiddenHomeStaysHiddenWhenNewFullscreenWindowsComeAndGo() throws {
+        backend.screen.windows?[0].nativeFullscreen = true
+        backend.screen.windows?[0].nativeMonitor = ultra.monitor
+        try engine.refresh()
+        backend.setWindows(backend.screen.windows!.filter { $0.id != 2 })
+        try engine.refresh()
+        backend.screen.nativeVisible?[ultra.monitor] = 1
+        try engine.removeEmptySpace(external.id)
+
+        backend.screen.nativeVisible?.removeValue(forKey: ultra.monitor)
+        backend.setWindows(backend.screen.windows!.filter { $0.id != 1 })
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        let replacement = WindowInfo(id: 88, workspace: external.workspace, nativeFullscreen: true, nativeMonitor: ultra.monitor)
+        backend.setWindows(backend.screen.windows! + [replacement])
+        try engine.refresh()
+
+        let link = try XCTUnwrap(engine.map.fullscreens.first { $0.identity == replacement.identity })
+        XCTAssertEqual(link.homeID, external.id)
+        XCTAssertNotEqual(link.spaceID, external.id)
+        XCTAssertTrue(try XCTUnwrap(engine.map.spaces.first { $0.id == external.id }).isDormant)
+        backend.setWindows(backend.screen.windows!.filter { $0.id != replacement.id })
+        for _ in 0..<DynamicEngine.absenceConfirmations { try engine.refresh() }
+        XCTAssertTrue(try XCTUnwrap(engine.map.spaces.first { $0.id == external.id }).isDormant)
+        XCTAssertTrue(engine.map.fullscreens.isEmpty)
+    }
+
+    func testDeleteRejectsEmptyLookingWorkspaceWithAnUnverifiedWindowHome() throws {
+        let id = try engine.createSpace(nearID: external.id, displayID: ultra.id)
+        let space = try XCTUnwrap(engine.map.spaces.first { $0.id == id })
+        backend.screen.windowHomes?.append(WindowHome(id: 99, pid: 42, boot: "test", workspace: space.workspace))
+        let before = engine.map.undo
+        XCTAssertThrowsError(try engine.removeEmptySpace(id)) { failure in
+            XCTAssertEqual((failure as? GridError)?.localizedDescription,
+                           GridError.unavailable("AeroGrid todavía está verificando las ventanas de este espacio").localizedDescription)
+        }
+        XCTAssertEqual(engine.map.undo, before)
+        XCTAssertNil(engine.map.pending)
+    }
+
     func testEmptyFamilyMemberCanBeRemovedWithoutDiscardingSurvivingWindows() throws {
         try unplug()
         let child = try XCTUnwrap(engine.map.spaces.first { $0.sourceID == external.id })

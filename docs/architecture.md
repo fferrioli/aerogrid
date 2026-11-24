@@ -29,6 +29,8 @@ Native fullscreen remembers the original layout without freezing its membership:
 
 Fullscreen app cards can move to empty destinations or creation slots on the same physical display. These moves exchange the fullscreen destination's map rectangle with an empty rectangle, preserving the native Space and all other app positions. Occupied destinations, split/stack drops, and moves to another physical display are rejected. One organization Undo restores the map; fullscreen exit retains the chosen position through the existing edited-fullscreen reconciliation.
 
+Deleting an empty card that supplies a fullscreen workspace frees its grid position and keeps the backend routing identity dormant. Fullscreen cards keep their identities and positions. The home becomes visible again only when a normal window actually occupies it. Undo restores the removed card.
+
 Some apps omit background fullscreen windows from Accessibility after a backend restart. A pending window home remains discoverable when WindowServer confirms its owner and the native Spaces API confirms its physical display. The backend validates boot/PID/workspace/display before opening that exact native Space, then requests AX discovery. It neither activates background apps during inventory polling nor invents destinations from an unverified saved ID.
 
 Not observing a fullscreen window is not taken as its closure. Three independent defenses cover a locked or dark session:
