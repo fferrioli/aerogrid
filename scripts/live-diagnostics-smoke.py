@@ -3,6 +3,7 @@
 import argparse
 import json
 import stat
+import time
 
 from live_fixture_session import activate, command, fixture_session, native_by_monitor, status, wait_for, write_json
 
@@ -48,7 +49,7 @@ def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     with fixture_session(lambda desktop: next(d for d in desktop["displays"] if d["monitor"] == desktop["focusedMonitor"])) as session:
         verify(session)
-    print("PASS: isolated controller recorded geometry, fullscreen attribution, navigation, empty-space deletion and Undo")
+    print("PASS: isolated controller recorded geometry, fullscreen attribution, fullscreen-to-normal navigation, empty-space deletion and Undo")
 
 
 def verify(session):
@@ -193,11 +194,48 @@ def verify_delete_fullscreen_home(session, windows, fullscreen_window, fullscree
     after = space_map()
     if link not in after["fullscreens"] or card not in after["spaces"]:
         raise RuntimeError("Deleting the empty card changed the fullscreen destination")
+    normal = next(cell for cell in after["spaces"] if cell["workspace"] == other_workspace)
+    verify_fullscreen_to_normal(session, card, normal, fullscreen_window, action_ok, observe)
+
     next_action = observe()[2][-1]["sequence"]
     (session.directory / "undo-organization").touch()
     wait_for(lambda: action_ok("undo", next_action), "the organizer's Undo action")
     if home_is_hidden() or link not in space_map()["fullscreens"]:
         raise RuntimeError("Undo did not recover the empty card and preserve fullscreen")
+
+
+def verify_fullscreen_to_normal(session, fullscreen, normal, window, action_ok, observe):
+    def rectangle(card):
+        return card.get("foldedRect") if combined and card.get("foldedRect") else {
+            "row": card["row"], "column": card["column"],
+            "width": card.get("spanColumns", 1), "height": card.get("spanRows", 1),
+        }
+
+    combined = len(status()["displays"]) == 1
+    source, target = rectangle(fullscreen), rectangle(normal)
+    if target["column"] >= source["column"] + source["width"]:
+        direction = "right"
+    elif target["column"] + target["width"] <= source["column"]:
+        direction = "left"
+    elif target["row"] >= source["row"] + source["height"]:
+        direction = "down"
+    else:
+        direction = "up"
+    monitor = str(session.monitor)
+    for _ in range(3):
+        start = observe()[2][-1]["sequence"]
+        session.jump(fullscreen["id"])
+        wait_for(lambda: action_ok("openSpace", start)
+                 and status().get("nativeVisible", {}).get(monitor) == window, "fixture fullscreen to become visible")
+        start = observe()[2][-1]["sequence"]
+        write_json(session.directory / "navigate.json", direction)
+        wait_for(lambda: action_ok("navigate", start), "directional change from fullscreen to the normal workspace")
+        end = time.monotonic() + 0.8
+        while time.monotonic() < end:
+            desktop = status()
+            if desktop["visible"].get(monitor) != normal["workspace"] or monitor in desktop.get("nativeVisible", {}):
+                raise RuntimeError("The gesture completed but its normal destination stopped being visible")
+            time.sleep(0.1)
 
 
 if __name__ == "__main__":

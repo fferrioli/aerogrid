@@ -242,10 +242,25 @@ struct GridMinimumWidthTracker {
     saved.tree = command.reconcileNativeTree(saved.tree, workspace)
     command.restore(saved, workspace)
 }
-private func gridBootIdentity() -> String {
-    // WindowServer IDs are only meaningful during this login/boot; also check owner PID.
-    var boot = timeval(); var size = MemoryLayout<timeval>.size
-    _ = unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0)
+private let gridBootSession: String = {
+    // Unlike kern.boottime, this identifier survives wall-clock adjustments and backend relaunches.
+    var bytes = [CChar](repeating: 0, count: 37)
+    var size = bytes.count
+    let status = unsafe sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0)
+    if status == 0, size == bytes.count, bytes.last == 0 {
+        let value = String(decoding: bytes.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        if let uuid = UUID(uuidString: value) { return uuid.uuidString }
+    }
+    // On failure, trust this process's observations only.
+    return UUID().uuidString
+}()
+
+private func gridBootIdentity() -> String { gridBootSession }
+
+private func gridLegacyBootTime() -> String? {
+    var boot = timeval()
+    var size = MemoryLayout<timeval>.size
+    guard unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0) == 0, boot.tv_sec > 0 else { return nil }
     return String(boot.tv_sec)
 }
 struct GridLayoutCommand: Command {
@@ -547,6 +562,8 @@ struct GridLayoutCommand: Command {
         var value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,
                                   "focusedWindow": focusedWindow.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 3]
+        value["bootSession"] = boot
+        value["legacyBootTime"] = gridLegacyBootTime()
         if includeDiagnostics {
             let workspaces = Workspace.all.map { workspace in
                 ["name": workspace.name, "monitor": workspace.workspaceMonitor.monitorId_oneBased ?? 0] as [String: Any]

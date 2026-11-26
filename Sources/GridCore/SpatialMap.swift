@@ -192,6 +192,30 @@ public enum SpaceInsertion {
     }
 }
 
+/// Projects an axis while removing only lanes wholly unoccupied on the external board.
+private struct OccupiedAxis {
+    private var bands: [Range<Int>] = []
+
+    init(_ ranges: [Range<Int>]) {
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = bands.last, range.lowerBound <= last.upperBound {
+                bands[bands.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                bands.append(range)
+            }
+        }
+    }
+
+    func position(_ coordinate: Int) -> Int {
+        var occupied = 0
+        for band in bands where coordinate >= band.lowerBound {
+            occupied += min(coordinate, band.upperBound) - band.lowerBound
+            if coordinate < band.upperBound { break }
+        }
+        return occupied
+    }
+}
+
 extension SpaceMap {
     /// Keep valid adapted positions; rebuild only those that conflict. Window layouts and
     /// the independent display boards are untouched. Projection places cleared entries.
@@ -217,10 +241,21 @@ extension SpaceMap {
         for board in boardIDs {
             let members = spaces.filter { $0.board == board }
             let visible = members.filter { !$0.isDormant }
-            let minRow = visible.map(\.row).min() ?? 0
-            let offset = board == "builtin" ? 0 : nextRow - minRow
-            result += members.map { space in var copy = space; copy.row += offset; return copy }
-            nextRow = (result.filter { !$0.isDormant }.map { $0.rect.bottom }.max() ?? nextRow)
+            if board == "builtin" {
+                result += members
+            } else {
+                let rows = OccupiedAxis(visible.map { $0.row..<$0.rect.bottom })
+                let columns = OccupiedAxis(visible.map { $0.column..<$0.rect.right })
+                let left = result.filter { !$0.isDormant }.map { ($0.foldedRect ?? $0.rect).column }.min() ?? 0
+                result += members.map { space in
+                    guard !space.isDormant else { return space }
+                    var projected = space
+                    projected.row = nextRow + rows.position(space.row)
+                    projected.column = left + columns.position(space.column)
+                    return projected
+                }
+            }
+            nextRow = result.filter { !$0.isDormant }.map { ($0.foldedRect ?? $0.rect).bottom }.max() ?? nextRow
         }
         // Once adapted, edits on the small display do not shift another board.
         var placed = result.filter { $0.foldedRect != nil && !$0.isDormant }.map { space in

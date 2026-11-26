@@ -113,6 +113,7 @@ public struct RuntimeState: Codable, Equatable {
     public var lastDesktop: Desktop? = nil
     public var windowMinimumWidths: [String: Double]? = nil
     public var minimumWidthDetectionVersion: Int? = nil
+    public var legacyFullscreenGeometryResolved: Bool? = nil
     public var dynamicMap: SpaceMap? = nil
     public init() {}
 }
@@ -144,6 +145,8 @@ public struct Desktop: Codable, Equatable {
     public var focusedWindow: UInt32?
     public var nativeHomes: [String: Int]? = nil
     public var backendSession: String? = nil
+    public var bootSession: String? = nil
+    public var legacyBootTime: String? = nil
     public var windowHomes: [WindowHome]? = nil
     public var windows: [WindowInfo]? = nil
     public var nativeVisible: [Int: UInt32]? = nil

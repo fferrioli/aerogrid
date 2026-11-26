@@ -119,8 +119,11 @@ public final class DynamicEngine {
         emit(.adaptedGeometryRepaired, count: repaired.count)
         recoveryNotice = "Mapa reparado: \(repaired.count) posición(es) adaptada(s). Se conservaron tus ventanas y distribuciones."
     }
-    private func editMap(_ body: (inout SpaceMap) throws -> Void) rethrows {
-        var next = map; try body(&next); state.dynamicMap = next
+    @discardableResult private func editMap<Result>(_ body: (inout SpaceMap) throws -> Result) rethrows -> Result {
+        var next = map
+        let result = try body(&next)
+        state.dynamicMap = next
+        return result
     }
     public func persist() throws { try map.validate(); try store?.save(state, name: "state.json") }
     public func importVisibleLayouts() throws {
@@ -512,14 +515,19 @@ public final class DynamicEngine {
             map.placeTemplates = map.placeTemplates.map { $0.filter { ids.contains($0.key) } }
         }
         try repairAdaptedGeometryIfNeeded()
+        var desktop = try readDesktop()
+        if state.migrateBootIdentity(using: desktop) {
+            observed = state.lastDesktop
+            emit(.bootIdentityMigrated)
+            desktop = try readDesktop()
+        }
         let before = observed
-        let desktop = try readDesktop()
         guard desktop.windows != nil else { throw GridError.unavailable("Update AeroGrid Backend to enable the dynamic map") }
         let restarted = before?.backendSession != nil && before?.backendSession != desktop.backendSession
         let recovering = restarted || map.pending != nil || blackoutSamples > 0
         // Changes made by fullscreen/topology reconciliation belong to the engine, not the user.
         defer { rememberPlaceWorkspaces(windows) }
-        let knownBoot = desktop.windows?.first?.boot
+        let knownBoot = desktop.bootSession ?? desktop.windows?.first?.boot
         editMap { map in
             map.fullscreenPlaces = map.fullscreenPlaces.map { places in
                 Array(places.filter { place in
@@ -580,6 +588,7 @@ public final class DynamicEngine {
             multiwindowRelaunchOwners.removeAll()
         }
         try reconcileFullscreen(previous: before)
+        recoverLegacyFullscreenGeometry()
         if !restoringPlaces, let deadline = placeRestoreDeadline, now() < deadline {
             _ = try applyPlaces(automatic: true)
         }
@@ -627,6 +636,15 @@ public final class DynamicEngine {
         }
         try persist()
         rememberRelaunchPlaces()
+    }
+    private func recoverLegacyFullscreenGeometry() {
+        guard state.legacyFullscreenGeometryResolved != true, observed?.bootSession != nil, map.folded else { return }
+        let live = Set(windows.map(\.identity) + (observed?.windowHomes ?? []).map {
+            WindowIdentity(id: $0.id, pid: $0.pid, boot: $0.boot)
+        })
+        let result = editMap { $0.recoverEditedFullscreenPositions(live: live) }
+        if result.resolved { state.legacyFullscreenGeometryResolved = true }
+        if result.recovered > 0 { emit(.fullscreenPositionsRecovered, count: result.recovered) }
     }
     private func restoreDisplayPositions(before: Desktop) throws {
         guard let desktop = observed else { return }
@@ -887,7 +905,8 @@ public final class DynamicEngine {
                 emit(.fullscreenExit, window: link.identity, space: link.spaceID)
             } else {
                 samples.windowed = 0
-                let bootChanged = windows.first.map { $0.boot != link.identity.boot } ?? false
+                let boot = observed?.bootSession ?? windows.first?.boot
+                let bootChanged = boot.map { $0 != link.identity.boot } ?? false
                 let alive = isProcessAlive(link.identity.pid)
                 if alive && !bootChanged {
                     samples.absent += 1
@@ -1198,11 +1217,16 @@ public final class DynamicEngine {
                 guard try readDesktop().topology == before.topology else { throw GridError.stale }
                 try show(space, on: display, prevalidated: true)
             }
+            var actual = try readDesktop()
             guard let origin = before.displays.first(where: { $0.id == selection.originDisplayID }),
-                  try readDesktop().topology == before.topology else { throw GridError.stale }
-            try backend.focus(monitor: origin.monitor, window: nil)
-            let actual = try readDesktop()
-            if actual.focusedMonitor != origin.monitor { emit(.focusMismatch, reason: "monitor", display: origin.id) }
+                  actual.topology == before.topology else { throw GridError.stale }
+            if actual.focusedMonitor != origin.monitor {
+                try backend.focus(monitor: origin.monitor, window: nil)
+                actual = try readDesktop()
+                if actual.focusedMonitor != origin.monitor { emit(.focusMismatch, reason: "monitor", display: origin.id) }
+            }
+            guard actual.topology == before.topology else { throw GridError.stale }
+            for (display, space) in moves { try confirmVisible(space, on: display, desktop: actual) }
             sync(actual)
             editMap { map in
                 if map.anchors == nil { map.anchors = [:] }
@@ -1226,22 +1250,35 @@ public final class DynamicEngine {
     private func show(_ space: Space, on display: Display, prevalidated: Bool = false) throws {
         if !prevalidated { try backend.validateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id) }
         try backend.activateTarget(workspace: space.workspace, monitor: display.monitor, window: space.nativeWindow?.id)
-        let actual = try readDesktop()
-        if space.nativeWindow != nil {
-            guard actual.nativeVisible?[display.monitor] == space.nativeWindow?.id else {
-                emit(.navigationMismatch, reason: "fullscreen", window: space.nativeWindow, space: space.id, display: display.id)
-                throw GridError.unavailable("Fullscreen destination did not become visible")
-            }
-        } else {
-            guard actual.visible[display.monitor] == space.workspace, actual.nativeVisible?[display.monitor] == nil else {
-                emit(.navigationMismatch, reason: "normal", space: space.id, display: display.id)
-                throw GridError.unavailable("Normal destination did not become visible")
-            }
-            if let layout = map.layouts[space.id], let saved = try? LayoutSnapshot(json: layout), saved.boot == actual.windows?.first?.boot {
+        var actual = try readDesktop()
+        if space.nativeWindow == nil {
+            // The Dock may still be settling, or rebuilding the tiling tree can raise
+            // the previous app. One final activation can recover without rebuilding again.
+            if isVisible(space, on: display, desktop: actual),
+               let layout = map.layouts[space.id], let saved = try? LayoutSnapshot(json: layout),
+               saved.boot == actual.windows?.first?.boot {
                 try backend.restore(workspace: space.workspace, snapshot: layout)
+                actual = try readDesktop()
+            }
+            if !isVisible(space, on: display, desktop: actual) {
+                try backend.activateTarget(workspace: space.workspace, monitor: display.monitor, window: nil)
+                actual = try readDesktop()
             }
         }
+        try confirmVisible(space, on: display, desktop: actual)
         editMap { $0.cursors[display.id] = space.id }
+    }
+    private func isVisible(_ space: Space, on display: Display, desktop: Desktop) -> Bool {
+        let native = desktop.nativeVisible?[display.monitor]
+        if let window = space.nativeWindow { return native == window.id }
+        return native == nil && desktop.visible[display.monitor] == space.workspace
+    }
+    private func confirmVisible(_ space: Space, on display: Display, desktop: Desktop) throws {
+        guard isVisible(space, on: display, desktop: desktop) else {
+            let mode = space.nativeWindow == nil ? "normal" : "fullscreen"
+            emit(.navigationMismatch, reason: mode, window: space.nativeWindow, space: space.id, display: display.id)
+            throw GridError.unavailable("El espacio seleccionado no quedó visible")
+        }
     }
     private func restoreVisible(_ desktop: Desktop, cursors: [String: String]) throws {
         let actual = try readDesktop()

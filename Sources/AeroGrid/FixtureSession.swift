@@ -69,6 +69,7 @@ enum FixtureSession {
         let (run, request) = try verificationRequest(token: token)
         let model = try AppModel(fixture: (run, request))
         let jump = run.appendingPathComponent("jump.json")
+        let navigate = run.appendingPathComponent("navigate.json")
         let remove = run.appendingPathComponent("remove-empty-space.json")
         let undo = run.appendingPathComponent("undo-organization")
         let stop = run.appendingPathComponent("stop-observer")
@@ -82,6 +83,10 @@ enum FixtureSession {
                     let cell = try JSONDecoder().decode(String.self, from: data)
                     try FileManager.default.removeItem(at: jump)
                     model.openFixtureSpace(cell, display: request.display.id)
+                } else if let data = try? Data(contentsOf: navigate) {
+                    let direction = try JSONDecoder().decode(Direction.self, from: data)
+                    try FileManager.default.removeItem(at: navigate)
+                    model.navigate(direction, scope: .active, displayID: request.display.id)
                 } else if let data = try? Data(contentsOf: remove) {
                     let cell = try JSONDecoder().decode(String.self, from: data)
                     try FileManager.default.removeItem(at: remove)

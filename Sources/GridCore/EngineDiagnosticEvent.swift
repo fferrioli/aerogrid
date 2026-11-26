@@ -19,6 +19,8 @@ public struct EngineDiagnosticEvent {
         case foldSkipped = "fold-skipped"
         case topologyChanged = "topology-changed"
         case backendRestarted = "backend-restarted"
+        case bootIdentityMigrated = "boot-identity-migrated"
+        case fullscreenPositionsRecovered = "fullscreen-positions-recovered"
         case adaptedGeometryRepaired = "adapted-geometry-repaired"
         case familyFolded = "family-folded"
         case familyReunited = "family-reunited"

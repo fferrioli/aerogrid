@@ -141,6 +141,44 @@ extension DynamicEngineTests {
         XCTAssertThrowsError(try engine.commitNavigation(selection))
         XCTAssertTrue(backend.activations.isEmpty)
     }
+    func testNormalGestureRecoversWhenLayoutRestoreReturnsToFullscreen() throws {
+        let selection = try navigationSelection()
+        let targetID = try XCTUnwrap(selection.selected[ultra.id]?.spaceID)
+        let target = try XCTUnwrap(engine.map.spaces.first { $0.id == targetID })
+        backend.onRestore = { [backend, ultra] workspace in
+            if workspace == target.workspace { backend?.screen.nativeVisible?[ultra.monitor] = 501 }
+        }
+        backend.onMonitorFocus = { [backend, ultra] _ in
+            XCTFail("The gesture already focused its target display")
+            backend?.screen.nativeVisible?[ultra.monitor] = 501
+        }
+        try engine.commitNavigation(selection)
+        XCTAssertEqual(backend.screen.visible[ultra.monitor], target.workspace)
+        XCTAssertNil(backend.screen.nativeVisible?[ultra.monitor])
+        XCTAssertEqual(backend.activations.map(\.0), [target.workspace, target.workspace])
+    }
+
+    func testCoordinatedGestureVerifiesDestinationsAfterRestoringFocus() throws {
+        let selection = try navigationSelection(scope: .all)
+        let before = backend.screen.visible
+        let anchors = engine.map.anchors
+        let targetID = try XCTUnwrap(selection.selected[ultra.id]?.spaceID)
+        let target = try XCTUnwrap(engine.map.spaces.first { $0.id == targetID })
+        // Activation runs by board order. Put focus elsewhere before the final focus call.
+        backend.onRestore = { [backend, laptop] workspace in
+            if workspace == target.workspace { backend?.screen.focusedMonitor = laptop.monitor }
+        }
+        backend.onMonitorFocus = { [backend, ultra] monitor in
+            if monitor == ultra.monitor, backend?.screen.visible[monitor] == target.workspace {
+                backend?.screen.nativeVisible?[monitor] = 501
+            }
+        }
+        XCTAssertThrowsError(try engine.commitNavigation(selection))
+        XCTAssertEqual(backend.screen.visible, before)
+        XCTAssertEqual(engine.map.anchors, anchors)
+        XCTAssertTrue(engine.consumeDiagnosticEvents().contains { $0.kind == .navigationMismatch && $0.space == targetID })
+    }
+
     func testConsecutiveNavigationUsesCommittedOrigin() throws {
         let forward = try navigationSelection()
         try engine.commitNavigation(forward)

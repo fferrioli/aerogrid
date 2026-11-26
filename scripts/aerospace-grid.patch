@@ -155,10 +155,10 @@ index c611f75..42e61af 100644
              case .layout:
 diff --git a/Sources/AppBundle/command/impl/GridLayoutCommand.swift b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
 new file mode 100644
-index 0000000..173958e
+index 0000000..29beae9
 --- /dev/null
 +++ b/Sources/AppBundle/command/impl/GridLayoutCommand.swift
-@@ -0,0 +1,706 @@
+@@ -0,0 +1,723 @@
 +// AeroGrid's versioned, narrowly scoped layout snapshot extension.
 +import AppKit
 +import Common
@@ -403,10 +403,25 @@ index 0000000..173958e
 +    saved.tree = command.reconcileNativeTree(saved.tree, workspace)
 +    command.restore(saved, workspace)
 +}
-+private func gridBootIdentity() -> String {
-+    // WindowServer IDs are only meaningful during this login/boot; also check owner PID.
-+    var boot = timeval(); var size = MemoryLayout<timeval>.size
-+    _ = unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0)
++private let gridBootSession: String = {
++    // Unlike kern.boottime, this identifier survives wall-clock adjustments and backend relaunches.
++    var bytes = [CChar](repeating: 0, count: 37)
++    var size = bytes.count
++    let status = unsafe sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0)
++    if status == 0, size == bytes.count, bytes.last == 0 {
++        let value = String(decoding: bytes.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self)
++        if let uuid = UUID(uuidString: value) { return uuid.uuidString }
++    }
++    // On failure, trust this process's observations only.
++    return UUID().uuidString
++}()
++
++private func gridBootIdentity() -> String { gridBootSession }
++
++private func gridLegacyBootTime() -> String? {
++    var boot = timeval()
++    var size = MemoryLayout<timeval>.size
++    guard unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0) == 0, boot.tv_sec > 0 else { return nil }
 +    return String(boot.tv_sec)
 +}
 +struct GridLayoutCommand: Command {
@@ -708,6 +723,8 @@ index 0000000..173958e
 +        var value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
 +                                  "focusedMonitor": focusedMonitor,
 +                                  "focusedWindow": focusedWindow.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 3]
++        value["bootSession"] = boot
++        value["legacyBootTime"] = gridLegacyBootTime()
 +        if includeDiagnostics {
 +            let workspaces = Workspace.all.map { workspace in
 +                ["name": workspace.name, "monitor": workspace.workspaceMonitor.monitorId_oneBased ?? 0] as [String: Any]
