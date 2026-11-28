@@ -91,7 +91,9 @@ final class AppModel: ObservableObject {
             let role = request.display.builtin ? "builtin" : "external"
             var isolated = Configuration(backendPath: FixtureSession.backend)
             let cell = Cell(id: request.workspace, row: 0, column: 0, name: "Fixture", workspace: request.workspace)
-            isolated.grids = [GridCore.Grid(id: "fixture", name: "Fixture", displayRole: role, cells: [cell])]
+            let reserve = request.workspace + "-laptop"
+            let dormant = Cell(id: reserve, row: 0, column: 8, name: "Dormant fixture", workspace: reserve)
+            isolated.grids = [GridCore.Grid(id: "fixture", name: "Fixture", displayRole: role, columns: 9, cells: [cell, dormant])]
             isolated.displayAssignments = [role: request.display.id]
             config = isolated
         } else {

@@ -49,7 +49,7 @@ def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     with fixture_session(lambda desktop: next(d for d in desktop["displays"] if d["monitor"] == desktop["focusedMonitor"])) as session:
         verify(session)
-    print("PASS: isolated controller recorded geometry, fullscreen attribution, fullscreen-to-normal navigation, empty-space deletion and Undo")
+    print("PASS: isolated controller recorded geometry, fullscreen attribution, fullscreen-to-normal navigation, dormant workspace placement, empty-space deletion and Undo")
 
 
 def verify(session):
@@ -94,6 +94,9 @@ def verify(session):
     try:
         real = session.windows
         members = wait_for(normal_samples, "recorded window frames and native memberships")
+        if len(status()["displays"]) == 1:
+            verify_dormant_wake(session, real[-1])
+            wait_for(normal_samples, "the fixture windows back on their original workspace")
         target = real[0]["id"]
         command("macos-native-fullscreen", "--window-id", target, "on")
 
@@ -157,6 +160,39 @@ def verify(session):
             blind_marker.unlink()
         if target is not None and any(w["id"] == target and w["nativeFullscreen"] for w in fixture_windows()):
             command("macos-native-fullscreen", "--window-id", target, "off")
+
+
+def verify_dormant_wake(session, window):
+    path = session.directory / "state.json"
+    workspace = session.workspace + "-laptop"
+    identity = {key: window[key] for key in ("id", "pid", "boot")}
+
+    def card(name=None):
+        cells = json.loads(path.read_text())["dynamicMap"]["spaces"]
+        return next(cell for cell in cells if cell["workspace"] == (name or session.workspace))
+
+    def move(target):
+        command("grid-layout", "--workspace", target, "--data", json.dumps(identity), "move-window")
+
+    anchor = card()["foldedRect"]
+    reserve = card(workspace)
+    assert reserve["dormant"] and reserve["column"] == 8
+    command("layout", "--window-id", window["id"], "floating")
+    move(workspace)
+    activate(workspace, session.monitor)
+    wait_for(lambda: not card(workspace)["dormant"], "floating window to wake its reserved workspace")
+    result = card(workspace)
+    frame = result["foldedRect"]
+    distance = abs(frame["row"] - anchor["row"]) + abs(frame["column"] - anchor["column"])
+    if result["id"] != reserve["id"] or result["column"] != reserve["column"] or distance != 1 or card()["foldedRect"] != anchor:
+        raise RuntimeError("A dormant workspace did not wake beside the prior card without moving it")
+    if not any(w["id"] == window["id"] and w["floating"] and w["workspace"] == workspace for w in status()["windows"]):
+        raise RuntimeError("The awakened card did not retain the floating window in its assigned workspace")
+
+    activate(session.workspace, session.monitor)
+    move(session.workspace)
+    command("layout", "--window-id", window["id"], "tiling")
+    wait_for(lambda: card(workspace)["dormant"], "the empty fixture workspace to become dormant after leaving it")
 
 
 def verify_delete_fullscreen_home(session, windows, fullscreen_window, fullscreen_cell, observe):

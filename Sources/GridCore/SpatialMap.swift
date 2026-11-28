@@ -17,6 +17,12 @@ public struct SpaceRect: Codable, Equatable, Hashable {
     public func overlaps(_ other: SpaceRect) -> Bool {
         column < other.right && right > other.column && row < other.bottom && bottom > other.row
     }
+    func sharesEdge(with other: SpaceRect) -> Bool {
+        let rowsOverlap = row < other.bottom && bottom > other.row
+        let columnsOverlap = column < other.right && right > other.column
+        return (rowsOverlap && (column == other.right || right == other.column))
+            || (columnsOverlap && (row == other.bottom || bottom == other.row))
+    }
     public func contains(row: Int, column: Int) -> Bool {
         row >= self.row && row < bottom && column >= self.column && column < right
     }

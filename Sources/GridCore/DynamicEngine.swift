@@ -183,30 +183,36 @@ public final class DynamicEngine {
         return desktop
     }
     private func sync(_ desktop: Desktop) {
+        let previous = observed
         observed = desktop
         if map.version >= 3 {
             for index in map.spaces.indices where map.spaces[index].isDormant {
                 let space = map.spaces[index]
+                let members = desktop.windows?.filter { $0.workspace == space.workspace } ?? []
                 if space.hiddenFullscreenHome == true {
                     // Fullscreen windows and the underlying visible workspace do not occupy this card.
-                    guard desktop.windows?.contains(where: { window in
-                        window.workspace == space.workspace && !window.nativeFullscreen
-                            && window.nativeSpace != "fullscreen" && window.nativeSpace != "unknown"
+                    guard members.contains(where: { window in
+                        !window.nativeFullscreen && window.nativeSpace != "fullscreen" && window.nativeSpace != "unknown"
                             && !map.fullscreens.contains { $0.identity == window.identity }
-                    }) == true else { continue }
+                    }) else { continue }
                 } else {
-                    guard desktop.windows?.contains(where: { $0.workspace == space.workspace }) == true
-                        || desktop.visible.values.contains(space.workspace) else { continue }
+                    guard !members.isEmpty || desktop.visible.values.contains(space.workspace) else { continue }
                 }
                 var next = map
                 if !next.fits(space.rect, board: space.board, excluding: [space.id]) {
                     let occupied = next.spaces.filter { $0.board == space.board && !$0.isDormant && $0.id != space.id }.map(\.rect)
                     next.spaces[index].rect = SpacePlacement.nearestVacancy(near: space.rect, occupied: occupied, width: space.rect.width, height: space.rect.height)
                 }
-                emit(.spaceWoken, space: space.id)
+                let wakingWindow = members.first(where: { $0.id == desktop.focusedWindow }) ?? members.first
+                let reason: String
+                if let wakingWindow { reason = wakingWindow.floating ? "floating-window" : "window" }
+                else { reason = "visible" }
+                emit(.spaceWoken, reason: reason, window: wakingWindow?.identity, space: space.id)
                 next.spaces[index].dormant = false
                 next.spaces[index].hiddenFullscreenHome = nil
-                next.spaces[index].foldedRect = nil // A dormant slot no longer reserves its old adapted position.
+                next.spaces[index].foldedRect = wakingWindow.flatMap { _ in
+                    wakePosition(for: space, desktop: desktop, previous: previous)
+                }
                 state.dynamicMap = next
             }
         }
@@ -217,6 +223,29 @@ public final class DynamicEngine {
             }
         }
         state.lastDesktop = desktop
+    }
+    private func wakePosition(for space: Space, desktop: Desktop, previous: Desktop?) -> SpaceRect? {
+        guard map.initialized == true, space.hiddenFullscreenHome != true,
+              desktop.displays.count == 1, let display = desktop.displays.first else { return nil }
+        let active = map.projectedSpaces(combined: true).filter { !$0.isDormant }
+        let occupied = active.map(\.rect)
+        let remembered = space.foldedRect ?? space.rect
+        if !occupied.contains(where: { $0.overlaps(remembered) }),
+           occupied.contains(where: { $0.sharesEdge(with: remembered) }) {
+            return remembered
+        }
+        // The backend may already show the waking workspace (e.g. an app rule routed
+        // a popup there). Use the prior visible card as the anchor, while it is still known.
+        let prior = previous.flatMap { old -> Space? in
+            guard let sameDisplay = old.displays.first(where: { $0.id == display.id }) else { return nil }
+            return currentSpace(on: sameDisplay, desktop: old)
+        }
+        let anchor = active.first { $0.id == prior?.id }
+            ?? active.first { $0.id == map.cursors[display.id] }
+            ?? active.first
+        guard let anchor else { return nil }
+        return SpacePlacement.nearestVacancy(near: anchor.rect, occupied: occupied,
+                                             width: remembered.width, height: remembered.height)
     }
     private func snapshot(_ space: Space) throws -> LayoutSnapshot { try LayoutSnapshot(json: backend.snapshot(workspace: space.workspace)) }
     private func hasWindowMovedOut(of space: Space) -> Bool {
