@@ -87,6 +87,24 @@ final class SpatialTests: XCTestCase {
         XCTAssertEqual(map.spaces, old)
     }
 
+    func testExternalProjectionCompactsEmptyLanesAndPreservesSavedLaptopSlots() {
+        var map = SpaceMap(configuration: Configuration(backendPath: "/unused"))
+        let laptop = Space(id: "laptop", name: "Laptop", row: 1, column: 3, workspace: "laptop", preferredRole: "builtin")
+        var first = Space(id: "first", name: "First", row: 5, column: 7, workspace: "first", preferredRole: "external")
+        first.rect = SpaceRect(row: 5, column: 7, width: 2, height: 2)
+        let second = Space(id: "second", name: "Second", row: 12, column: 20, workspace: "second", preferredRole: "external")
+        var saved = Space(id: "saved", name: "Saved", row: 5, column: 20, workspace: "saved", preferredRole: "external")
+        saved.foldedRect = SpaceRect(row: 3, column: 8)
+        map.spaces = [laptop, first, second, saved]
+
+        let combined = Dictionary(uniqueKeysWithValues: map.projectedSpaces(combined: true).map { ($0.id, $0.rect) })
+        XCTAssertEqual(combined["laptop"], laptop.rect)
+        XCTAssertEqual(combined["first"], SpaceRect(row: 2, column: 3, width: 2, height: 2))
+        XCTAssertEqual(combined["second"], SpaceRect(row: 4, column: 5))
+        XCTAssertEqual(combined["saved"], saved.foldedRect)
+        XCTAssertEqual(map.projectedSpaces(combined: false), [laptop, first, second, saved])
+    }
+
     func testCombinedProjectionPlacesCollisionBesideSourceInsteadOfFarFrontier() throws {
         var map = SpaceMap(configuration: Configuration(backendPath: "/unused"))
         map.version = 3

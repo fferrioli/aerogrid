@@ -91,6 +91,9 @@ struct DiagnosticReconciliation: Encodable {
     let event: String
     let reason: String?
     let count: Int?
+    let ordinal: Int?
+    let moved: Int?
+    let missing: Int?
     let window: String?
     let cell: String?
     let display: String?
@@ -99,6 +102,9 @@ struct DiagnosticReconciliation: Encodable {
         event = source.kind.rawValue
         reason = source.reason
         count = source.count
+        ordinal = source.ordinal
+        moved = source.moved
+        missing = source.missing
         window = source.window.map(aliases.window)
         cell = source.space.map { aliases.id("cell", $0) }
         display = source.display.map { aliases.id("display", $0) }

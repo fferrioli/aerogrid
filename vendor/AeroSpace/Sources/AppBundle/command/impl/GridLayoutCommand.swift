@@ -242,10 +242,25 @@ struct GridMinimumWidthTracker {
     saved.tree = command.reconcileNativeTree(saved.tree, workspace)
     command.restore(saved, workspace)
 }
-private func gridBootIdentity() -> String {
-    // WindowServer IDs are only meaningful during this login/boot; also check owner PID.
-    var boot = timeval(); var size = MemoryLayout<timeval>.size
-    _ = unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0)
+private let gridBootSession: String = {
+    // Unlike kern.boottime, this identifier survives wall-clock adjustments and backend relaunches.
+    var bytes = [CChar](repeating: 0, count: 37)
+    var size = bytes.count
+    let status = unsafe sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0)
+    if status == 0, size == bytes.count, bytes.last == 0 {
+        let value = String(decoding: bytes.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        if let uuid = UUID(uuidString: value) { return uuid.uuidString }
+    }
+    // On failure, trust this process's observations only.
+    return UUID().uuidString
+}()
+
+private func gridBootIdentity() -> String { gridBootSession }
+
+private func gridLegacyBootTime() -> String? {
+    var boot = timeval()
+    var size = MemoryLayout<timeval>.size
+    guard unsafe sysctlbyname("kern.boottime", &boot, &size, nil, 0) == 0, boot.tv_sec > 0 else { return nil }
     return String(boot.tv_sec)
 }
 struct GridLayoutCommand: Command {
@@ -277,7 +292,7 @@ struct GridLayoutCommand: Command {
             if args.operation.val == "status" {
                 guard isUnitTest || AXIsProcessTrusted() else { return .fail(io.err("AeroGrid Backend needs Accessibility permission")) }
                 guard isUnitTest || gridBackendReady else { return .fail(io.err("AeroGrid Backend is still starting")) }
-                return .succ(io.out(try await status(includeDiagnostics: args.data == "diagnostics")))
+                return .succ(io.out(try await status(ownsBackendUI: ownsBackendUI, includeDiagnostics: args.data == "diagnostics")))
             }
             if args.operation.val == "native-status" { return .succ(io.out(try gridNativeStatus())) }
             if args.operation.val == "native-focus" {
@@ -461,7 +476,7 @@ struct GridLayoutCommand: Command {
         return window
     }
 
-    @MainActor private func status(includeDiagnostics: Bool) async throws -> String {
+    @MainActor private func status(ownsBackendUI: Bool, includeDiagnostics: Bool) async throws -> String {
         let nativeDisplaySnapshot = nativeDisplays()
         let displays: [[String: Any]] = sortedMonitorInfos.map { m in
             let index = m.monitorAppKitNsScreenScreensId - 1
@@ -521,6 +536,7 @@ struct GridLayoutCommand: Command {
                     "appName": window.app.name ?? "Application", "bundleID": window.app.rawAppBundleId ?? "",
                     "nativeFullscreen": native,
                     "nativeSpace": gridClassifyNativeSpace(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot).rawValue]
+                if ownsBackendUI && gridWindowHasWorkspaceRule(window) { value["ruled"] = true }
                 if native, let monitor = gridNativeMonitor(windowSpaces: spaceIDs, displays: nativeDisplaySnapshot)?.monitorId_oneBased { value["nativeMonitor"] = monitor }
                 inventory.append(value)
                 if includeDiagnostics {
@@ -546,6 +562,8 @@ struct GridLayoutCommand: Command {
         var value: [String: Any] = ["windows": inventory, "nativeVisible": nativeVisible, "displays": displays, "visible": visible, "nativeHomes": nativeHomes, "backendSession": gridBackendSession, "windowHomes": homes,
                                   "focusedMonitor": focusedMonitor,
                                   "focusedWindow": focusedWindow.map { NSNumber(value: $0.windowId) } ?? NSNull(), "extensionVersion": 3]
+        value["bootSession"] = boot
+        value["legacyBootTime"] = gridLegacyBootTime()
         if includeDiagnostics {
             let workspaces = Workspace.all.map { workspace in
                 ["name": workspace.name, "monitor": workspace.workspaceMonitor.monitorId_oneBased ?? 0] as [String: Any]

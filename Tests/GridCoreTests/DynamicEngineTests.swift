@@ -14,6 +14,8 @@ final class MapBackend: Backend {
     var failValidation: String?
     var failSnapshot: String?
     var onSnapshot: ((String) -> Void)?
+    var onRestore: ((String) -> Void)?
+    var onMonitorFocus: ((Int) -> Void)?
     init(_ screen: Desktop) { self.screen = screen }
     func desktop() throws -> Desktop { calls.append("desktop"); return screen }
     func validate(workspace: String, monitor: Int) throws {}
@@ -32,7 +34,11 @@ final class MapBackend: Backend {
         if let window { screen.nativeVisible?[monitor] = window; screen.focusedWindow = window }
         else { screen.nativeVisible?.removeValue(forKey: monitor); screen.visible[monitor] = workspace; screen.focusedWindow = screen.windows?.first(where: { $0.workspace == workspace && !$0.nativeFullscreen })?.id }
     }
-    func focus(monitor: Int, window: UInt32?) throws { screen.focusedMonitor = monitor; if let window { screen.focusedWindow = window } }
+    func focus(monitor: Int, window: UInt32?) throws {
+        screen.focusedMonitor = monitor
+        if let window { screen.focusedWindow = window }
+        onMonitorFocus?(monitor)
+    }
     func focus(window: UInt32) throws { if !ignoresWindowFocus { screen.focusedWindow = window } }
     func windows(workspace: String) throws -> [UInt32] { (screen.windows ?? []).filter { $0.workspace == workspace }.map(\.id) }
     func move(window: UInt32, workspace: String) throws {
@@ -60,7 +66,10 @@ final class MapBackend: Backend {
         }
         return try saved.json()
     }
-    func restore(workspace: String, snapshot: String) throws { trees[workspace] = try LayoutSnapshot(json: snapshot) }
+    func restore(workspace: String, snapshot: String) throws {
+        trees[workspace] = try LayoutSnapshot(json: snapshot)
+        onRestore?(workspace)
+    }
     func layout(workspace: String, profile: String) throws {}
     func setWindows(_ windows: [WindowInfo]) {
         screen.windows = windows

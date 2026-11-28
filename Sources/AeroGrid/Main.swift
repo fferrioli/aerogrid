@@ -17,6 +17,7 @@ import GridCore
     private var monitors: [Any] = []
     private var menuObservers: [NSObjectProtocol] = []
     private var quitting = false
+    private var fixtureHandoff: URL?
     private var statusObservation: AnyCancellable?
     private var updateObservation: AnyCancellable?
     var updates: AppUpdates?
@@ -57,12 +58,27 @@ import GridCore
             })
             if let local = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown],handler: { [weak self] event in self?.checkOutsideClick(); return event }) { monitors.append(local) }
             if let global = NSEvent.addGlobalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown],handler: { [weak self] _ in self?.checkOutsideClick() }) { monitors.append(global) }
+            menuObservers.append(DistributedNotificationCenter.default().addObserver(forName: FixtureSession.handoff, object: nil, queue: .main) { [weak self] notification in
+                MainActor.assumeIsolated { self?.beginFixtureHandoff(token: notification.object as? String) }
+            })
             model.start()
             updates.start()
             if !model.inputReady && !model.paused { openSettings() }
         } catch {
             let alert = NSAlert(); alert.messageText = "AeroGrid couldn't start"; alert.informativeText = error.localizedDescription; alert.runModal(); NSApp.terminate(nil)
         }
+    }
+    private func beginFixtureHandoff(token: String?) {
+        guard let model, model.backendReady, !model.paused, !model.pauseChanging,
+              !quitting, fixtureHandoff == nil, updates?.phase.isBusy == false,
+              let run = try? FixtureSession.activeRun(), token == run.lastPathComponent else { return }
+        do {
+            // Cancellation unlinks the same request. Exactly one side can consume it.
+            try FileManager.default.moveItem(at: run.appendingPathComponent("handoff-request"),
+                                             to: run.appendingPathComponent("handoff-started"))
+        } catch { return }
+        fixtureHandoff = run
+        RunLoop.main.perform(inModes: [.common]) { NSApp.terminate(nil) }
     }
     @objc func statusClicked() {
         if NSApp.currentEvent?.type == .rightMouseUp || model?.paused == true {
@@ -83,7 +99,16 @@ import GridCore
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self
             menu.addItem(item)
         }
-        add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover))
+        add("Ajustes…", #selector(openSettings)); add("Recuperar", #selector(recover)); add("Restaurar lugares", #selector(restorePlaces))
+        if let setups = model?.setups, !setups.isEmpty {
+            let submenu = NSMenu()
+            for setup in setups {
+                let item = NSMenuItem(title: setup.name, action: #selector(applySetupItem(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = setup.id; submenu.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Aplicar setup", action: nil, keyEquivalent: ""); parent.submenu = submenu
+            menu.addItem(parent)
+        }
         add(model?.paused == true ? "Reanudar AeroGrid" : "Pausar AeroGrid", #selector(togglePause))
         menu.addItem(.separator())
         add(updates?.primaryTitle ?? "Buscar actualizaciones…", #selector(updatePrimary))
@@ -218,13 +243,20 @@ import GridCore
     }
     @objc func togglePause() { if let model { model.setPaused(!model.paused) } }
     @objc func recover() { model?.recover() }
+    @objc func restorePlaces() { model?.restorePlaces() }
+    @objc func applySetupItem(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { model?.applySetup(id: id) } }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateLater }
         updates?.stop()
         guard let model else { return .terminateNow }
         quitting = true
-        model.prepareToQuit { sender.reply(toApplicationShouldTerminate:true) }
+        model.prepareToQuit(preservingBackend: fixtureHandoff != nil) {
+            if let run = self.fixtureHandoff {
+                try? Data().write(to: run.appendingPathComponent("handoff-ready"), options: .atomic)
+            }
+            sender.reply(toApplicationShouldTerminate:true)
+        }
         return .terminateLater
     }
     private func makeWindow<V: View>(title: String, view: V) -> NSWindow {
@@ -255,8 +287,32 @@ struct AeroGridMain {
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
             return
         }
-        if args.first == "--verify-dynamic-fixtures", args.count == 2 || (args.count == 3 && args[2] == "--normal-only") {
-            do { try DynamicVerification.run(output: URL(fileURLWithPath: args[1]),nativeChecks:args.count == 2) }
+        if args.first == "--fixture-handoff" {
+            do {
+                guard args.count == 1 else { throw GridError.invalid("Invalid fixture handoff request") }
+                let run = try FixtureSession.activeRun()
+                guard let controller = otherInstances.first else { throw GridError.unavailable("Start the installed controller first") }
+                DistributedNotificationCenter.default().postNotificationName(FixtureSession.handoff, object: run.lastPathComponent,
+                                                                             userInfo: nil, deliverImmediately: true)
+                print(controller.processIdentifier)
+            } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
+        if args.first == "--fixture-observe" {
+            do {
+                guard args.count == 2 else { throw GridError.invalid("Use scripts/live-diagnostics-smoke.py to observe fixtures") }
+                try FixtureSession.observe(token: args[1])
+            }
+            catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            return
+        }
+        if args.first == "--verify-dynamic-fixtures" {
+            do {
+                guard args.count == 2 || (args.count == 3 && args[2] == "--normal-only") else {
+                    throw GridError.invalid("Use scripts/run-live-smoke.py --dynamic to verify fixtures")
+                }
+                try DynamicVerification.run(token: args[1], nativeChecks: args.count == 2)
+            }
             catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
             return
         }
@@ -315,6 +371,8 @@ struct AeroGridMain {
         if args.first == "--migrate-state" {
             do {
                 guard otherInstances.isEmpty else { throw GridError.invalid("Quit AeroGrid before migrating its state") }
+                let admission = try FixtureSession.admitController()
+                defer { withExtendedLifetime(admission) {} }
                 let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AeroGrid")
                 let store = try Store(directory: directory)
                 guard let config = try store.load(Configuration.self, name: "config.json") else { throw GridError.invalid("Configuration not installed") }
@@ -350,9 +408,12 @@ struct AeroGridMain {
             return
         }
         if !otherInstances.isEmpty { return }
-        let app = NSApplication.shared
-        let delegate = ApplicationDelegate(); app.delegate = delegate
-        withExtendedLifetime(delegate) { app.run() }
+        do {
+            let admission = try FixtureSession.admitController()
+            let app = NSApplication.shared
+            let delegate = ApplicationDelegate(); app.delegate = delegate
+            withExtendedLifetime((admission, delegate)) { app.run() }
+        } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
     }
 }
 

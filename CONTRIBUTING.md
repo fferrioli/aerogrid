@@ -21,17 +21,25 @@ Root tests exercise the core model, layout/navigation behavior, organization tra
 
 Recorded gesture fixtures use aliased contact identifiers and contain no window content. Replay is useful regression evidence; it does not prove physical gesture behavior.
 
-To check local placement history with the installed frontend and its matching backend, build the disposable fixture and run the opt-in smoke:
+## Run live fixtures
+
+Use an installed controller and matching backend built from this checkout. Start AeroGrid, leave it active and unlocked on a normal macOS desktop, and finish any update first. Keep the desktop idle during the run. Use ordinary Accessibility approvals for the installed apps.
 
 ```sh
 mkdir -p dist
 swiftc -parse-as-library Tests/Fixtures/windows.swift -o dist/GridFixture
 python3 scripts/live-diagnostics-smoke.py
+python3 scripts/run-live-smoke.py
+python3 scripts/run-live-smoke.py --dynamic
 ```
 
-Leave local diagnostics enabled. During the countdown, switch to an existing empty AeroGrid cell on a normal macOS desktop and close the organizer. The smoke starts three GridFixture windows, changes fullscreen and discovery state only for a fixture window, and uses the running frontend to open that fixture's fullscreen card. It checks frames, native membership, command correlation, unattributed occupancy during the injected disappearance, recovery, and local file permissions. It closes its fixture on exit. Use a disposable session or test cell and leave the desktop idle during the run.
+Run the checks one at a time. Diagnostics exercises the installed controller’s history, fullscreen navigation, and the organizer’s delete and Undo actions with an empty fullscreen home. The backend smoke checks live layout snapshots and native Spaces. `--dynamic` requires the built-in and external displays. It exercises the controller against the live backend and simulates display topology changes. `--normal-only` skips its native fullscreen checks. For physical disconnect, reconnect, and optional backend restart, run `python3 scripts/live-hardware.py [--restart-backend]` from a disposable macOS account with both displays attached and no managed windows.
 
-To verify the installed opt-out, disable **Record local window and Space diagnostics**, reproduce a fixture change, and check that both history files remain byte-for-byte unchanged. Restart AeroGrid and confirm the toggle stays off. Turn it back on to check that the next observable state starts new checkpoints.
+The ordinary controller drains pending work and quits while the installed backend stays up. Each run gets fresh state, workspaces and diagnostics in a private directory under `~/Library/Caches/AeroGrid/LiveFixtures`. The startup interlock holds the ordinary controller out until fixture processes have stopped, their windows are gone, and the original visible workspaces, native Spaces and surviving focus are restored. Results are printed or saved under the private run directory. These runs collect temporary diagnostic history independently of the normal preference.
+
+Ctrl-C and termination trigger the same cleanup. If a runner is force-killed, or native restoration fails, reconnect the original displays and run `python3 scripts/run-live-smoke.py --recover` before restarting AeroGrid. Keep the recorded native Spaces available for recovery. Raw reports stay local. Run directories can be removed after recovery completes.
+
+To verify the installed diagnostics opt-out separately, disable **Record local window and Space diagnostics**, make an ordinary window change, and check that both history files remain byte-for-byte unchanged. Restart AeroGrid to confirm the toggle stays off. Turn it back on to check that the next observable state starts new checkpoints.
 
 For frontend CPU changes, `AeroGrid --benchmark-idle REPORT.json` measures process CPU and model publications with visible settings, hidden settings, and no UI. It uses 12 fictional windows, a fake backend, and a deliberately frequent 0.5-second poll. Do not equate these short synthetic measurements with a long-running user's Activity Monitor reading. Unchanged polls must produce no UI publications; real focus/layout changes and corroborated release settlement must still propagate.
 
